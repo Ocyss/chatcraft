@@ -24,8 +24,13 @@ jobs:
     steps:
       - name: Clone.
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Init desktop submodule.
+        # 只拉 desktop：android/ios 暂不需要，且 ios 的嵌套子模块源仓库已失效
+        shell: bash
+        run: |
+          git submodule update --init clients/desktop
+          git -C clients/desktop submodule update --init --recursive
 
       - name: Prepare directories.
         # 复刻官方布局：TBuild\Libraries 与客户端仓库互为兄弟目录
@@ -38,7 +43,7 @@ jobs:
 
       - name: Apply chatcraft patches.
         shell: bash
-        run: scripts/apply-patches.sh all
+        run: scripts/apply-patches.sh desktop
 
       - name: Build Rust FFI library.
         shell: bash
