@@ -22,6 +22,11 @@ jobs:
         shell: cmd
 
     steps:
+      - name: Clone.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
       - name: Prepare directories.
         # 复刻官方布局：TBuild\Libraries 与客户端仓库互为兄弟目录
         run: |
@@ -30,11 +35,6 @@ jobs:
           mklink /d %userprofile%\TBuild\desktop %GITHUB_WORKSPACE%\clients\desktop
           echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
           echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
-
-      - name: Clone.
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Apply chatcraft patches.
         shell: bash
