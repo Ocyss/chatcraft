@@ -1,0 +1,299 @@
+diff --git a/Telegram/CMakeLists.txt b/Telegram/CMakeLists.txt
+index 6922eb0e72..68613d6b9c 100644
+--- a/Telegram/CMakeLists.txt
++++ b/Telegram/CMakeLists.txt
+@@ -111,6 +111,25 @@ PRIVATE
+     desktop-app::external_xxhash
+ )
+ 
++# Chatcraft: 消息过滤 FFI 核心（Rust）。
++# 期望布局：仓库根目录下 chatcraft/{chatcraft_ffi.dll, lib/chatcraft_ffi.lib}
++if (WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../chatcraft/lib/chatcraft_ffi.lib")
++    add_library(external_chatcraft_ffi SHARED IMPORTED GLOBAL)
++    set_target_properties(external_chatcraft_ffi PROPERTIES
++        IMPORTED_IMPLIB "${CMAKE_CURRENT_SOURCE_DIR}/../chatcraft/lib/chatcraft_ffi.lib"
++        IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/../chatcraft/chatcraft_ffi.dll"
++    )
++    target_link_libraries(Telegram PRIVATE external_chatcraft_ffi)
++    add_custom_command(TARGET Telegram POST_BUILD
++        COMMAND ${CMAKE_COMMAND} -E copy_if_different
++            "${CMAKE_CURRENT_SOURCE_DIR}/../chatcraft/chatcraft_ffi.dll"
++            "$<TARGET_FILE_DIR:Telegram>/chatcraft_ffi.dll"
++    )
++    target_compile_definitions(Telegram PRIVATE CHATCRAFT_ENABLED=1)
++else()
++    message(WARNING "Chatcraft FFI not found, building without filter support.")
++endif()
++
+ if (NOT DESKTOP_APP_DISABLE_SWIFT6)
+     telegram_add_apple_swift_runtime(Telegram)
+ endif()
+@@ -120,6 +139,9 @@ nice_target_sources(Telegram ${src_loc}
+ PRIVATE
+     ${style_files}
+ 
++    chatcraft/chatcraft_filter.cpp
++    chatcraft/chatcraft_filter.h
++
+     api/api_attached_stickers.cpp
+     api/api_attached_stickers.h
+     api/api_authorizations.cpp
+diff --git a/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp b/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp
+new file mode 100644
+index 0000000000..c8601ae032
+--- /dev/null
++++ b/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp
+@@ -0,0 +1,143 @@
++// Chatcraft: Telegram Desktop 消息过滤 FFI 桥接层。
++// 由 patches/desktop 维护，rebase 上游时请保留本目录。
++#include "chatcraft/chatcraft_filter.h"
++
++#include "history/history.h"
++#include "history/history_item.h"
++#include "history/history_item_components.h"
++#include "data/data_peer.h"
++
++#include <QtCore/QJsonDocument>
++#include <QtCore/QJsonObject>
++#include <QtCore/QDir>
++#include <QtCore/QFile>
++
++#ifdef CHATCRAFT_ENABLED
++
++using namespace Qt::Literals::StringLiterals;
++
++extern "C" {
++
++void *chatcraft_engine_new(const char *config_json);
++void chatcraft_engine_free(void *engine);
++char *chatcraft_filter_message(const void *engine, const char *message_json);
++void chatcraft_string_free(char *s);
++bool chatcraft_ads_disabled();
++
++} // extern "C"
++
++namespace Chatcraft {
++namespace {
++
++void *g_engine = nullptr;
++bool g_triedInit = false;
++
++[[nodiscard]] std::string ReadConfig() {
++	if (const auto raw = qgetenv("CHATCRAFT_CONFIG"); !raw.isEmpty()) {
++		return raw.toStdString();
++	}
++	const auto path = QString::fromUtf8(qgetenv("CHATCRAFT_CONFIG_FILE"));
++	if (!path.isEmpty()) {
++		auto file = QFile(path);
++		if (file.open(QIODevice::ReadOnly)) {
++			return file.readAll().toStdString();
++		}
++	}
++	const auto script = QString::fromUtf8(qgetenv("CHATCRAFT_LUA_SCRIPT"));
++	if (!script.isEmpty()) {
++		auto config = QJsonObject();
++		config.insert(u"lua_script"_q, QDir::current().absoluteFilePath(script));
++		return QJsonDocument(config).toJson(QJsonDocument::Compact).toStdString();
++	}
++	return {};
++}
++
++[[nodiscard]] QJsonObject MessageToJson(not_null<const HistoryItem*> item) {
++	const auto peer = item->history()->peer;
++	const auto from = item->from();
++
++	auto chatType = u"private"_q;
++	if (const auto channel = peer->asChannel()) {
++		chatType = channel->isMegagroup() ? u"supergroup"_q : u"channel"_q;
++	} else if (peer->isChat()) {
++		chatType = u"group"_q;
++	}
++
++	auto message = QJsonObject();
++	message.insert(u"id"_q, qint64(item->id.bare));
++	message.insert(u"chat_id"_q, qint64(peer->id.value));
++	message.insert(u"chat_type"_q, chatType);
++	message.insert(u"chat_title"_q, peer->name());
++	if (from) {
++		message.insert(u"sender_id"_q, qint64(peerIsUser(from->id)
++			? from->id.value
++			: 0));
++		message.insert(u"sender_name"_q, from->name());
++	}
++	message.insert(u"text"_q, item->originalText().text);
++	message.insert(u"is_sponsored"_q, item->isSponsored());
++	message.insert(
++		u"is_forwarded"_q,
++		item->Get<HistoryMessageForwarded>() != nullptr);
++	return message;
++}
++
++} // namespace
++
++void EnsureInitialized() {
++	if (g_triedInit) {
++		return;
++	}
++	g_triedInit = true;
++	const auto config = ReadConfig();
++	g_engine = chatcraft_engine_new(config.empty() ? nullptr : config.c_str());
++	if (!g_engine) {
++		LOG(("Chatcraft: engine init failed, filtering disabled."));
++	}
++}
++
++FilterAction FilterMessage(not_null<const HistoryItem*> item) {
++	EnsureInitialized();
++	if (!g_engine) {
++		return FilterAction::Allow;
++	}
++	const auto json = QJsonDocument(MessageToJson(item))
++		.toJson(QJsonDocument::Compact);
++	char *raw = chatcraft_filter_message(g_engine, json.constData());
++	if (!raw) {
++		return FilterAction::Allow;
++	}
++	const auto guard = gsl::finally([&] { chatcraft_string_free(raw); });
++
++	const auto doc = QJsonDocument::fromJson(QByteArray(raw));
++	const auto action = doc.object().value(u"action"_q).toString();
++	if (action == u"hide") {
++		return FilterAction::Hide;
++	} else if (action == u"collapse") {
++		return FilterAction::Collapse;
++	} else if (action == u"highlight") {
++		return FilterAction::Highlight;
++	}
++	return FilterAction::Allow;
++}
++
++bool AdsDisabled() {
++	return chatcraft_ads_disabled();
++}
++
++#else // CHATCRAFT_ENABLED
++
++void EnsureInitialized() {
++}
++
++FilterAction FilterMessage(not_null<const HistoryItem*>) {
++	return FilterAction::Allow;
++}
++
++bool AdsDisabled() {
++	return false;
++}
++
++#endif // CHATCRAFT_ENABLED
++
++} // namespace Chatcraft
+diff --git a/Telegram/SourceFiles/chatcraft/chatcraft_filter.h b/Telegram/SourceFiles/chatcraft/chatcraft_filter.h
+new file mode 100644
+index 0000000000..a79658c233
+--- /dev/null
++++ b/Telegram/SourceFiles/chatcraft/chatcraft_filter.h
+@@ -0,0 +1,32 @@
++// Chatcraft: Telegram Desktop 消息过滤 FFI 桥接层。
++// 由 patches/desktop 维护，rebase 上游时请保留本目录。
++#pragma once
++
++namespace HistoryView { class Element; }
++class HistoryItem;
++class History;
++
++namespace Chatcraft {
++
++enum class FilterAction {
++	Allow,
++	Hide,
++	Collapse,
++	Highlight,
++};
++
++// 惰性初始化，首次过滤时自动调用；也可在启动时显式调用。
++// 配置来源：
++//   CHATCRAFT_CONFIG      EngineConfig JSON 字符串
++//   CHATCRAFT_CONFIG_FILE EngineConfig JSON 文件路径
++//   CHATCRAFT_LUA_SCRIPT  Lua 脚本路径（等价于 config.lua_script）
++//   CHATCRAFT_DISABLE_ADS / CHATCRAFT_ENABLE_ADS 广告开关（Rust 侧读取）
++void EnsureInitialized();
++
++// 对一条消息求值。FFI 不可用或出错时返回 Allow（安全降级）。
++FilterAction FilterMessage(not_null<const HistoryItem*> item);
++
++// 官方广告是否被禁用（环境变量 / 运行时覆盖）。
++bool AdsDisabled();
++
++} // namespace Chatcraft
+diff --git a/Telegram/SourceFiles/history/history.cpp b/Telegram/SourceFiles/history/history.cpp
+index 0f5468f074..95cbc169d1 100644
+--- a/Telegram/SourceFiles/history/history.cpp
++++ b/Telegram/SourceFiles/history/history.cpp
+@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ */
+ #include "history/history.h"
+ 
++#include "chatcraft/chatcraft_filter.h"
++
+ #include "history/view/history_view_element.h"
+ #include "history/view/history_view_item_preview.h"
+ #include "history/view/history_view_translate_tracker.h"
+@@ -627,6 +629,11 @@ not_null<HistoryItem*> History::createItem(
+ 	const auto result = message.match([&](const auto &data) {
+ 		return makeMessage(id, data, localFlags);
+ 	});
++	// Chatcraft: 创建时评估过滤规则，结果缓存到 item 上。
++	if (!result->isFilteredOut()
++		&& Chatcraft::FilterMessage(result) == Chatcraft::FilterAction::Hide) {
++		result->setFilteredOut(true);
++	}
+ 	if (newMessage && result->out() && result->isRegular()) {
+ 		session().topPeers().increment(peer, result->date());
+ 		if (result->starsPaid()) {
+diff --git a/Telegram/SourceFiles/history/history_item.h b/Telegram/SourceFiles/history/history_item.h
+index b7cb8ddca9..b3d8d83f77 100644
+--- a/Telegram/SourceFiles/history/history_item.h
++++ b/Telegram/SourceFiles/history/history_item.h
+@@ -209,6 +209,9 @@ public:
+ 	[[nodiscard]] bool isScheduled() const;
+ 	[[nodiscard]] TimeId scheduleRepeatPeriod() const;
+ 	[[nodiscard]] bool isSponsored() const;
++	// Chatcraft: 过滤引擎标记。
++	[[nodiscard]] bool isFilteredOut() const { return _filteredOut; }
++	void setFilteredOut(bool value) { _filteredOut = value; }
+ 	[[nodiscard]] bool canLookupMessageAuthor() const;
+ 	[[nodiscard]] bool skipNotification() const;
+ 	[[nodiscard]] bool isUserpicSuggestion() const;
+@@ -823,6 +826,7 @@ private:
+ 	const not_null<PeerData*> _from;
+ 	mutable PeerData *_displayFrom = nullptr;
+ 	mutable MessageFlags _flags = 0;
++	bool _filteredOut = false; // Chatcraft: 过滤引擎标记。
+ 
+ 	TextWithEntities _text;
+ 
+diff --git a/Telegram/SourceFiles/history/view/history_view_element.cpp b/Telegram/SourceFiles/history/view/history_view_element.cpp
+index 057de48217..2cd2e9ae8d 100644
+--- a/Telegram/SourceFiles/history/view/history_view_element.cpp
++++ b/Telegram/SourceFiles/history/view/history_view_element.cpp
+@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ */
+ #include "history/view/history_view_element.h"
+ 
++#include "chatcraft/chatcraft_filter.h"
++
+ #include "apiwrap.h"
+ #include "api/api_transcribes.h"
+ #include "history/view/history_view_service_message.h"
+@@ -1635,7 +1637,10 @@ bool Element::isHiddenByGroup() const {
+ }
+ 
+ bool Element::isHidden() const {
+-	return isHiddenByGroup();
++	// Chatcraft: 过滤引擎隐藏 + 官方广告开关。
++	return isHiddenByGroup()
++		|| data()->isFilteredOut()
++		|| (data()->isSponsored() && Chatcraft::AdsDisabled());
+ }
+ 
+ void Element::overrideMedia(std::unique_ptr<Media> media) {

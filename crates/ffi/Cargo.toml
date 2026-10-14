@@ -1,0 +1,11 @@
+[package]
+name = "chatcraft-ffi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+chatcraft-core = { path = "../core" }
+serde_json.workspace = true

@@ -1,0 +1,9 @@
+[submodule "clients/desktop"]
+	path = clients/desktop
+	url = https://github.com/Ocyss/Telegram-Desktop.git
+[submodule "clients/android"]
+	path = clients/android
+	url = https://github.com/Ocyss/Telegram-Android.git
+[submodule "clients/ios"]
+	path = clients/ios
+	url = https://github.com/Ocyss/Telegram-IOS.git

@@ -1,0 +1,21 @@
+# Rust 核心：三端桌面平台跑测试
+name: core
+
+on:
+  push:
+    branches: [main]
+    paths: ["crates/**", "tests/**", "scripts/**", "Cargo.*"]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
