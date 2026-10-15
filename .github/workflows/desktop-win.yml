@@ -38,6 +38,9 @@ jobs:
           mkdir %userprofile%\TBuild\Libraries
           mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
           mklink /d %userprofile%\TBuild\desktop %GITHUB_WORKSPACE%\clients\desktop
+          rem prepare 脚本按仓库真实路径解析 ../Libraries，会写到 clients\Libraries
+          rem 用符号链接引回 TBuild\Libraries，与缓存路径保持一致
+          mklink /d %GITHUB_WORKSPACE%\clients\Libraries %userprofile%\TBuild\Libraries
           echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
           echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
 

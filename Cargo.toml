@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/core", "crates/ffi"]
+# 客户端子模块与 TBuild 里可能含独立 Rust workspace（如 wallet-engine、
+# tdesktop_rust），必须排除，否则 cargo 报 "multiple workspace roots"。
+exclude = ["clients", "TBuild"]
 
 [workspace.package]
 version = "0.1.0"
