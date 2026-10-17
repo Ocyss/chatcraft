@@ -87,9 +87,11 @@ jobs:
           nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
 
       - name: ThirdParty cache.
+        # prepare.py 以脚本位置上溯四级为 rootDir（本仓库即 clients/），
+        # ThirdParty 实际位于 clients/ThirdParty
         uses: actions/cache@v4
         with:
-          path: ${{ env.TBUILD }}\ThirdParty
+          path: clients/ThirdParty
           key: ${{ runner.OS }}-${{ runner.arch }}-third-party-${{ env.CACHE_KEY }}
           restore-keys: ${{ runner.OS }}-${{ runner.arch }}-third-party-
 
@@ -117,6 +119,19 @@ jobs:
       - name: Libraries.
         run: |
           %TBUILD%\desktop\Telegram\build\prepare\win.bat skip-release silent
+
+      - name: Verify dependencies.
+        # 依赖完整性检查：失败时直接列出目录，便于定位是未构建还是路径不一致
+        shell: bash
+        run: |
+          echo "LibrariesPath=$LibrariesPath"
+          ls "$LibrariesPath" || true
+          echo "--- Qt dirs ---"
+          ls -d "$LibrariesPath"/[qQ]t* 2>/dev/null || true
+          if ! compgen -G "$LibrariesPath/Qt-*" > /dev/null; then
+            echo "::error::Qt install dir (Qt-*) not found under $LibrariesPath"
+            exit 1
+          fi
 
       - name: Free up some disk space.
         shell: bash
