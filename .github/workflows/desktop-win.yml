@@ -169,6 +169,23 @@ jobs:
         shell: bash
         run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' ')' -type f ')' -o -empty ')' -delete
 
+      - name: Diagnose Qt discovery.
+        # 排查 "Neither Qt6 nor Qt5 is found"：逐一验证 cmake 可能使用的路径
+        shell: bash
+        run: |
+          for base in \
+            "$TBUILD/desktop/../Libraries/win64" \
+            "$GITHUB_WORKSPACE/clients/Libraries/win64" \
+            "$USERPROFILE/TBuild/Libraries/win64" \
+            "$TBUILD/desktop/Libraries/win64"; do
+            cfg="$base/Qt-5.15.19/lib/cmake/Qt5/Qt5Config.cmake"
+            if [ -f "$cfg" ]; then echo "OK      $cfg"; else echo "MISSING $cfg"; fi
+          done
+          echo "--- Qt-5.15.19 top level ---"
+          ls "$USERPROFILE/TBuild/Libraries/win64/Qt-5.15.19" || true
+          echo "--- lib/cmake ---"
+          ls "$USERPROFILE/TBuild/Libraries/win64/Qt-5.15.19/lib/cmake" 2>/dev/null | head -20 || true
+
       - name: Telegram Desktop build.
         # 使用官方测试 api_id/hash，无需配置 secrets；仅供本地测试，不可分发
         run: |
@@ -181,6 +198,7 @@ jobs:
           -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
           -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF ^
           -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF
+          if errorlevel 1 exit /b 1
 
           cmake --build ..\out --config Debug --parallel
 
