@@ -169,47 +169,13 @@ jobs:
         shell: bash
         run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' ')' -type f ')' -o -empty ')' -delete
 
-      - name: Diagnose Qt discovery.
-        # 排查 "Neither Qt6 nor Qt5 is found"：逐一验证 cmake 可能使用的路径
-        shell: bash
-        run: |
-          find "$USERPROFILE/TBuild/Libraries/win64/Qt-5.15.19" -maxdepth 3 -name '*Config.cmake' | head -20
-          for base in \
-            "$TBUILD/desktop/../Libraries/win64" \
-            "$GITHUB_WORKSPACE/clients/Libraries/win64" \
-            "$USERPROFILE/TBuild/Libraries/win64" \
-            "$TBUILD/desktop/Libraries/win64"; do
-            cfg="$base/Qt-5.15.19/lib/cmake/Qt5/Qt5Config.cmake"
-            if [ -f "$cfg" ]; then echo "OK      $cfg"; else echo "MISSING $cfg"; fi
-          done
-          echo "--- Qt-5.15.19 top level ---"
-          ls "$USERPROFILE/TBuild/Libraries/win64/Qt-5.15.19" || true
-          echo "--- lib/cmake ---"
-          ls "$USERPROFILE/TBuild/Libraries/win64/Qt-5.15.19/lib/cmake" 2>/dev/null | head -20 || true
-
-      - name: Probe Qt package.
-        # 官方 package.cmake 用 QUIET 吞掉了失败原因，这里不带 QUIET 复现
-        shell: bash
-        run: |
-          probe="$RUNNER_TEMP/qtprobe"
-          mkdir -p "$probe"
-          cat > "$probe/CMakeLists.txt" <<'EOF'
-          cmake_minimum_required(VERSION 3.21)
-          project(qtprobe CXX)
-          list(APPEND CMAKE_PREFIX_PATH "$ENV{QT_PROBE_PREFIX}")
-          find_package(QT NAMES Qt5 COMPONENTS Core)
-          message(STATUS "QT_FOUND=${QT_FOUND} QT_VERSION=${QT_VERSION}")
-          EOF
-          export QT_PROBE_PREFIX="$(cygpath -m "$USERPROFILE/TBuild/Libraries/win64/Qt-5.15.19")"
-          echo "prefix=$QT_PROBE_PREFIX"
-          cmake -S "$probe" -B "$probe/build" -A x64
-
       - name: Telegram Desktop build.
         # 使用官方测试 api_id/hash，无需配置 secrets；仅供本地测试，不可分发
         run: |
           cd %TBUILD%\desktop\Telegram
 
           call configure.bat ^
+          x64 ^
           -D TDESKTOP_API_TEST=ON ^
           -D CMAKE_CONFIGURATION_TYPES=Debug ^
           -D CMAKE_COMPILE_WARNING_AS_ERROR=ON ^
