@@ -173,6 +173,7 @@ jobs:
         # 排查 "Neither Qt6 nor Qt5 is found"：逐一验证 cmake 可能使用的路径
         shell: bash
         run: |
+          find "$USERPROFILE/TBuild/Libraries/win64/Qt-5.15.19" -maxdepth 3 -name '*Config.cmake' | head -20
           for base in \
             "$TBUILD/desktop/../Libraries/win64" \
             "$GITHUB_WORKSPACE/clients/Libraries/win64" \
