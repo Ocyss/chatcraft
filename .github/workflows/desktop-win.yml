@@ -86,17 +86,19 @@ jobs:
           nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
           nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
 
-      - name: ThirdParty cache.
+      - name: ThirdParty cache restore.
         # prepare.py 以脚本位置上溯四级为 rootDir（本仓库即 clients/），
         # ThirdParty 实际位于 clients/ThirdParty
-        uses: actions/cache@v4
+        id: cache-third-party
+        uses: actions/cache/restore@v4
         with:
           path: clients/ThirdParty
           key: ${{ runner.OS }}-${{ runner.arch }}-third-party-${{ env.CACHE_KEY }}
           restore-keys: ${{ runner.OS }}-${{ runner.arch }}-third-party-
 
-      - name: Libraries cache.
-        uses: actions/cache@v4
+      - name: Libraries cache restore.
+        id: cache-libs
+        uses: actions/cache/restore@v4
         with:
           path: |
             ${{ env.LibrariesPath }}\*
@@ -107,8 +109,9 @@ jobs:
           key: ${{ runner.OS }}-x64-libs-v2-${{ env.CACHE_KEY }}
           restore-keys: ${{ runner.OS }}-x64-libs-v2-
 
-      - name: Qt cache.
-        uses: actions/cache@v4
+      - name: Qt cache restore.
+        id: cache-qt
+        uses: actions/cache/restore@v4
         with:
           path: |
             ${{ env.LibrariesPath }}\[qQ]t[_-]*
@@ -120,6 +123,35 @@ jobs:
         run: |
           %TBUILD%\desktop\Telegram\build\prepare\win.bat skip-release silent
 
+      # 立即保存缓存（即使后续步骤失败），避免重跑时重建 Qt 等耗时依赖
+      - name: ThirdParty cache save.
+        if: always() && steps.cache-third-party.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: clients/ThirdParty
+          key: ${{ runner.OS }}-${{ runner.arch }}-third-party-${{ env.CACHE_KEY }}
+
+      - name: Libraries cache save.
+        if: always() && steps.cache-libs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\*
+            !${{ env.LibrariesPath }}\cache_keys
+            !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\*
+            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-x64-libs-v2-${{ env.CACHE_KEY }}
+
+      - name: Qt cache save.
+        if: always() && steps.cache-qt.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-x64-qt-${{ env.CACHE_KEY }}
+
       - name: Verify dependencies.
         # 依赖完整性检查：失败时直接列出目录，便于定位是未构建还是路径不一致
         shell: bash
@@ -128,7 +160,7 @@ jobs:
           ls "$LibrariesPath" || true
           echo "--- Qt dirs ---"
           ls -d "$LibrariesPath"/[qQ]t* 2>/dev/null || true
-          if ! compgen -G "$LibrariesPath/Qt-*" > /dev/null; then
+          if ! ls -d "$LibrariesPath"/Qt-* > /dev/null 2>&1; then
             echo "::error::Qt install dir (Qt-*) not found under $LibrariesPath"
             exit 1
           fi
