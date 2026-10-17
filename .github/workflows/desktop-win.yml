@@ -55,8 +55,9 @@ jobs:
           cargo build -p chatcraft-ffi --release
           mkdir -p TBuild/desktop/chatcraft/lib
           cp target/release/chatcraft_ffi.dll TBuild/desktop/chatcraft/
-          cp target/release/chatcraft_ffi.dll.lib TBuild/desktop/chatcraft/lib/ || \
-          cp target/release/chatcraft_ffi.lib TBuild/desktop/chatcraft/lib/
+          cp target/release/chatcraft_ffi.dll.lib TBuild/desktop/chatcraft/lib/chatcraft_ffi.lib || \
+          cp target/release/chatcraft_ffi.lib TBuild/desktop/chatcraft/lib/chatcraft_ffi.lib
+          ls -la TBuild/desktop/chatcraft TBuild/desktop/chatcraft/lib
 
       - name: First set up.
         shell: bash
@@ -167,7 +168,8 @@ jobs:
 
       - name: Free up some disk space.
         shell: bash
-        run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' ')' -type f ')' -o -empty ')' -delete
+        # 保留 tdesktop_rust：清理白名单不含 .cpp，会误删 wallet_engine 生成代码
+        run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' -o -path '*/tdesktop_rust/*' ')' -type f ')' -o -empty ')' -delete
 
       - name: Telegram Desktop build.
         # 使用官方测试 api_id/hash，无需配置 secrets；仅供本地测试，不可分发
