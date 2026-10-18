@@ -40,27 +40,28 @@ index 6922eb0e72..68613d6b9c 100644
      api/api_authorizations.cpp
 diff --git a/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp b/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp
 new file mode 100644
-index 0000000000..c8601ae032
+index 0000000000..8eb72e47cf
 --- /dev/null
 +++ b/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,139 @@
 +// Chatcraft: Telegram Desktop 消息过滤 FFI 桥接层。
 +// 由 patches/desktop 维护，rebase 上游时请保留本目录。
 +#include "chatcraft/chatcraft_filter.h"
 +
++#include "data/data_channel.h"
++#include "data/data_peer.h"
 +#include "history/history.h"
 +#include "history/history_item.h"
 +#include "history/history_item_components.h"
-+#include "data/data_peer.h"
 +
-+#include <QtCore/QJsonDocument>
-+#include <QtCore/QJsonObject>
++
 +#include <QtCore/QDir>
 +#include <QtCore/QFile>
++#include <QtCore/QJsonDocument>
++#include <QtCore/QJsonObject>
++
 +
 +#ifdef CHATCRAFT_ENABLED
-+
-+using namespace Qt::Literals::StringLiterals;
 +
 +extern "C" {
 +
@@ -79,110 +80,105 @@ index 0000000000..c8601ae032
 +bool g_triedInit = false;
 +
 +[[nodiscard]] std::string ReadConfig() {
-+	if (const auto raw = qgetenv("CHATCRAFT_CONFIG"); !raw.isEmpty()) {
-+		return raw.toStdString();
-+	}
-+	const auto path = QString::fromUtf8(qgetenv("CHATCRAFT_CONFIG_FILE"));
-+	if (!path.isEmpty()) {
-+		auto file = QFile(path);
-+		if (file.open(QIODevice::ReadOnly)) {
-+			return file.readAll().toStdString();
-+		}
-+	}
-+	const auto script = QString::fromUtf8(qgetenv("CHATCRAFT_LUA_SCRIPT"));
-+	if (!script.isEmpty()) {
-+		auto config = QJsonObject();
-+		config.insert(u"lua_script"_q, QDir::current().absoluteFilePath(script));
-+		return QJsonDocument(config).toJson(QJsonDocument::Compact).toStdString();
-+	}
-+	return {};
++  if (const auto raw = qgetenv("CHATCRAFT_CONFIG"); !raw.isEmpty()) {
++    return raw.toStdString();
++  }
++  const auto path = QString::fromUtf8(qgetenv("CHATCRAFT_CONFIG_FILE"));
++  if (!path.isEmpty()) {
++    auto file = QFile(path);
++    if (file.open(QIODevice::ReadOnly)) {
++      return file.readAll().toStdString();
++    }
++  }
++  const auto script = QString::fromUtf8(qgetenv("CHATCRAFT_LUA_SCRIPT"));
++  if (!script.isEmpty()) {
++    auto config = QJsonObject();
++    config.insert(QStringLiteral("lua_script"),
++                  QDir::current().absoluteFilePath(script));
++    return QJsonDocument(config).toJson(QJsonDocument::Compact).toStdString();
++  }
++  return {};
 +}
 +
-+[[nodiscard]] QJsonObject MessageToJson(not_null<const HistoryItem*> item) {
-+	const auto peer = item->history()->peer;
-+	const auto from = item->from();
++[[nodiscard]] QJsonObject MessageToJson(not_null<const HistoryItem *> item) {
++  const auto peer = item->history()->peer;
++  const auto from = item->from();
 +
-+	auto chatType = u"private"_q;
-+	if (const auto channel = peer->asChannel()) {
-+		chatType = channel->isMegagroup() ? u"supergroup"_q : u"channel"_q;
-+	} else if (peer->isChat()) {
-+		chatType = u"group"_q;
-+	}
++  auto chatType = QStringLiteral("private");
++  if (const auto channel = peer->asChannel()) {
++    chatType = channel->isMegagroup() ? QStringLiteral("supergroup")
++                                      : QStringLiteral("channel");
++  } else if (peer->isChat()) {
++    chatType = QStringLiteral("group");
++  }
 +
-+	auto message = QJsonObject();
-+	message.insert(u"id"_q, qint64(item->id.bare));
-+	message.insert(u"chat_id"_q, qint64(peer->id.value));
-+	message.insert(u"chat_type"_q, chatType);
-+	message.insert(u"chat_title"_q, peer->name());
-+	if (from) {
-+		message.insert(u"sender_id"_q, qint64(peerIsUser(from->id)
-+			? from->id.value
-+			: 0));
-+		message.insert(u"sender_name"_q, from->name());
-+	}
-+	message.insert(u"text"_q, item->originalText().text);
-+	message.insert(u"is_sponsored"_q, item->isSponsored());
-+	message.insert(
-+		u"is_forwarded"_q,
-+		item->Get<HistoryMessageForwarded>() != nullptr);
-+	return message;
++  auto message = QJsonObject();
++  message.insert(QStringLiteral("id"), qint64(item->id.bare));
++  message.insert(QStringLiteral("chat_id"), qint64(peer->id.value));
++  message.insert(QStringLiteral("chat_type"), chatType);
++  message.insert(QStringLiteral("chat_title"), peer->name());
++  if (from) {
++    message.insert(QStringLiteral("sender_id"),
++                   qint64(peerIsUser(from->id) ? from->id.value : 0));
++    message.insert(QStringLiteral("sender_name"), from->name());
++  }
++  message.insert(QStringLiteral("text"), item->originalText().text);
++  message.insert(QStringLiteral("is_sponsored"), item->isSponsored());
++  message.insert(QStringLiteral("is_forwarded"),
++                 item->Get<HistoryMessageForwarded>() != nullptr);
++  return message;
 +}
 +
 +} // namespace
 +
 +void EnsureInitialized() {
-+	if (g_triedInit) {
-+		return;
-+	}
-+	g_triedInit = true;
-+	const auto config = ReadConfig();
-+	g_engine = chatcraft_engine_new(config.empty() ? nullptr : config.c_str());
-+	if (!g_engine) {
-+		LOG(("Chatcraft: engine init failed, filtering disabled."));
-+	}
++  if (g_triedInit) {
++    return;
++  }
++  g_triedInit = true;
++  const auto config = ReadConfig();
++  g_engine = chatcraft_engine_new(config.empty() ? nullptr : config.c_str());
++  if (!g_engine) {
++    LOG(("Chatcraft: engine init failed, filtering disabled."));
++  }
 +}
 +
-+FilterAction FilterMessage(not_null<const HistoryItem*> item) {
-+	EnsureInitialized();
-+	if (!g_engine) {
-+		return FilterAction::Allow;
-+	}
-+	const auto json = QJsonDocument(MessageToJson(item))
-+		.toJson(QJsonDocument::Compact);
-+	char *raw = chatcraft_filter_message(g_engine, json.constData());
-+	if (!raw) {
-+		return FilterAction::Allow;
-+	}
-+	const auto guard = gsl::finally([&] { chatcraft_string_free(raw); });
++FilterAction FilterMessage(not_null<const HistoryItem *> item) {
++  EnsureInitialized();
++  if (!g_engine) {
++    return FilterAction::Allow;
++  }
++  const auto json =
++      QJsonDocument(MessageToJson(item)).toJson(QJsonDocument::Compact);
++  char *raw = chatcraft_filter_message(g_engine, json.constData());
++  if (!raw) {
++    return FilterAction::Allow;
++  }
++  const auto guard = gsl::finally([&] { chatcraft_string_free(raw); });
 +
-+	const auto doc = QJsonDocument::fromJson(QByteArray(raw));
-+	const auto action = doc.object().value(u"action"_q).toString();
-+	if (action == u"hide") {
-+		return FilterAction::Hide;
-+	} else if (action == u"collapse") {
-+		return FilterAction::Collapse;
-+	} else if (action == u"highlight") {
-+		return FilterAction::Highlight;
-+	}
-+	return FilterAction::Allow;
++  const auto doc = QJsonDocument::fromJson(QByteArray(raw));
++  const auto action = doc.object().value(QStringLiteral("action")).toString();
++  if (action == QLatin1String("hide")) {
++    return FilterAction::Hide;
++  } else if (action == QLatin1String("collapse")) {
++    return FilterAction::Collapse;
++  } else if (action == QLatin1String("highlight")) {
++    return FilterAction::Highlight;
++  }
++  return FilterAction::Allow;
 +}
 +
-+bool AdsDisabled() {
-+	return chatcraft_ads_disabled();
-+}
++bool AdsDisabled() { return chatcraft_ads_disabled(); }
 +
 +#else // CHATCRAFT_ENABLED
 +
-+void EnsureInitialized() {
++void EnsureInitialized() {}
++
++FilterAction FilterMessage(not_null<const HistoryItem *>) {
++  return FilterAction::Allow;
 +}
 +
-+FilterAction FilterMessage(not_null<const HistoryItem*>) {
-+	return FilterAction::Allow;
-+}
-+
-+bool AdsDisabled() {
-+	return false;
-+}
++bool AdsDisabled() { return false; }
 +
 +#endif // CHATCRAFT_ENABLED
 +
