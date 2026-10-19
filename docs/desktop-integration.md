@@ -23,43 +23,47 @@ git -C clients/desktop diff > patches/desktop/0001-chatcraft-filter.patch
 
 ## 补丁内容
 
-| 位置 | 改动 |
-|---|---|
+| 位置                                                      | 改动                                                                                            |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `Telegram/SourceFiles/chatcraft/chatcraft_filter.{h,cpp}` | 新增 FFI 桥：把 HistoryItem 序列化成 JSON 调 `chatcraft_filter_message()`，出错安全降级为 Allow |
-| `history/history.cpp` `createItem` | 消息创建时评估过滤，结果缓存到 item（覆盖历史加载 + 实时收信） |
-| `history/history_item.h` | 新增 `_filteredOut` 标记 |
-| `history/view/history_view_element.cpp` `isHidden()` | 被过滤消息或被禁广告不渲染（复用现有 hidden 机制，布局/合并/跳转自动适配） |
-| `Telegram/CMakeLists.txt` | 链接 `chatcraft/chatcraft_ffi.dll`，POST_BUILD 拷贝 dll 到 exe 旁 |
+| `history/history.cpp` `createItem`                        | 消息创建时评估过滤，结果缓存到 item（覆盖历史加载 + 实时收信）                                  |
+| `history/history_item.h`                                  | 新增 `_filteredOut` 标记                                                                        |
+| `history/view/history_view_element.cpp` `isHidden()`      | 被过滤消息或被禁广告不渲染（复用现有 hidden 机制，布局/合并/跳转自动适配）                      |
+| `Telegram/CMakeLists.txt`                                 | 静态链接 `chatcraft_ffi.lib` + Rust 系统依赖库，`CHATCRAFT_ENABLED` 宏                          |
 
 ## 期望的 FFI 库布局（构建前准备好）
 
+静态链接（内嵌进 Telegram.exe，无 dll 依赖）：
+
 ```
 clients/desktop/chatcraft/
-├── chatcraft_ffi.dll
 └── lib/chatcraft_ffi.lib
 ```
+
+注意必须以静态 CRT 构建（`RUSTFLAGS="-C target-feature=+crt-static"`），
+与 tdesktop 的 MultiThreaded 运行时一致。
 
 CI 里由 `desktop-win.yml` 自动完成；本地：
 
 ```powershell
+$env:RUSTFLAGS="-C target-feature=+crt-static"
 cargo build -p chatcraft-ffi --release
 mkdir clients\desktop\chatcraft\lib -Force
-copy target\release\chatcraft_ffi.dll clients\desktop\chatcraft\
-copy target\release\chatcraft_ffi.dll.lib clients\desktop\chatcraft\lib\chatcraft_ffi.lib
+copy target\release\chatcraft_ffi.lib clients\desktop\chatcraft\lib\chatcraft_ffi.lib
 scripts\apply-patches.bat
 # 然后按 docs/building-win.md 构建（先跑 Telegram\build\prepare\win.bat）
 ```
 
-找不到 dll 时 CMake 会以警告降级为无过滤构建（`CHATCRAFT_ENABLED` 未定义时桥接层为 stub）。
+找不到静态库时 CMake 会以警告降级为无过滤构建（`CHATCRAFT_ENABLED` 未定义时桥接层为 stub）。
 
 ## 运行时配置
 
-| 环境变量 | 作用 |
-|---|---|
-| `CHATCRAFT_LUA_SCRIPT` | Lua 过滤脚本路径（最简用法） |
-| `CHATCRAFT_CONFIG_FILE` | EngineConfig JSON 文件（规则 + Lua） |
-| `CHATCRAFT_CONFIG` | 直接传 JSON 字符串 |
-| `CHATCRAFT_DISABLE_ADS` / `CHATCRAFT_ENABLE_ADS` | 广告开关 |
+| 环境变量                                         | 作用                                 |
+| ------------------------------------------------ | ------------------------------------ |
+| `CHATCRAFT_LUA_SCRIPT`                           | Lua 过滤脚本路径（最简用法）         |
+| `CHATCRAFT_CONFIG_FILE`                          | EngineConfig JSON 文件（规则 + Lua） |
+| `CHATCRAFT_CONFIG`                               | 直接传 JSON 字符串                   |
+| `CHATCRAFT_DISABLE_ADS` / `CHATCRAFT_ENABLE_ADS` | 广告开关                             |
 
 ## 已知边界
 

@@ -52,12 +52,12 @@ jobs:
         shell: bash
         run: |
           rustup toolchain install stable --profile minimal
+          # 静态 CRT（与 tdesktop 的 MultiThreaded 一致），产出纯静态库内嵌进 exe
+          export RUSTFLAGS="-C target-feature=+crt-static"
           cargo build -p chatcraft-ffi --release
           mkdir -p TBuild/desktop/chatcraft/lib
-          cp target/release/chatcraft_ffi.dll TBuild/desktop/chatcraft/
-          cp target/release/chatcraft_ffi.dll.lib TBuild/desktop/chatcraft/lib/chatcraft_ffi.lib || \
           cp target/release/chatcraft_ffi.lib TBuild/desktop/chatcraft/lib/chatcraft_ffi.lib
-          ls -la TBuild/desktop/chatcraft TBuild/desktop/chatcraft/lib
+          ls -la TBuild/desktop/chatcraft/lib
 
       - name: First set up.
         shell: bash

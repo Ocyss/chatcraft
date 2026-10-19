@@ -1,24 +1,26 @@
 diff --git a/Telegram/CMakeLists.txt b/Telegram/CMakeLists.txt
-index 6922eb0e72..68613d6b9c 100644
+index 6922eb0e72..24ebad9c11 100644
 --- a/Telegram/CMakeLists.txt
 +++ b/Telegram/CMakeLists.txt
-@@ -111,6 +111,25 @@ PRIVATE
+@@ -111,6 +111,27 @@ PRIVATE
      desktop-app::external_xxhash
  )
  
-+# Chatcraft: 消息过滤 FFI 核心（Rust）。
-+# 期望布局：仓库根目录下 chatcraft/{chatcraft_ffi.dll, lib/chatcraft_ffi.lib}
++# Chatcraft: 消息过滤 FFI 核心（Rust，静态链接内嵌进 exe）。
++# 期望布局：仓库根目录下 chatcraft/lib/chatcraft_ffi.lib（以 +crt-static 构建）
 +if (WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../chatcraft/lib/chatcraft_ffi.lib")
-+    add_library(external_chatcraft_ffi SHARED IMPORTED GLOBAL)
++    add_library(external_chatcraft_ffi STATIC IMPORTED GLOBAL)
 +    set_target_properties(external_chatcraft_ffi PROPERTIES
-+        IMPORTED_IMPLIB "${CMAKE_CURRENT_SOURCE_DIR}/../chatcraft/lib/chatcraft_ffi.lib"
-+        IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/../chatcraft/chatcraft_ffi.dll"
++        IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/../chatcraft/lib/chatcraft_ffi.lib"
 +    )
-+    target_link_libraries(Telegram PRIVATE external_chatcraft_ffi)
-+    add_custom_command(TARGET Telegram POST_BUILD
-+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-+            "${CMAKE_CURRENT_SOURCE_DIR}/../chatcraft/chatcraft_ffi.dll"
-+            "$<TARGET_FILE_DIR:Telegram>/chatcraft_ffi.dll"
++    # Rust std 在 windows-msvc 下需要的系统库
++    target_link_libraries(Telegram PRIVATE
++        external_chatcraft_ffi
++        advapi32
++        bcrypt
++        ntdll
++        userenv
++        ws2_32
 +    )
 +    target_compile_definitions(Telegram PRIVATE CHATCRAFT_ENABLED=1)
 +else()
@@ -28,7 +30,7 @@ index 6922eb0e72..68613d6b9c 100644
  if (NOT DESKTOP_APP_DISABLE_SWIFT6)
      telegram_add_apple_swift_runtime(Telegram)
  endif()
-@@ -120,6 +139,9 @@ nice_target_sources(Telegram ${src_loc}
+@@ -120,6 +141,9 @@ nice_target_sources(Telegram ${src_loc}
  PRIVATE
      ${style_files}
  
