@@ -1,73 +1,71 @@
-# Desktop 接入补丁说明
+# Desktop fork integration
 
-## 结构
+## Source ownership
 
-```
-patches/desktop/0001-chatcraft-filter.patch   # 对 tdesktop 子模块的全部修改
-clients/desktop/                              # fork 子模块，保持干净，构建前打补丁
-```
+`clients/desktop` pins a commit in `Ocyss/Telegram-Desktop`. The fork contains
+`Telegram/SourceFiles/chatcraft/chatcraft_filter.{h,cpp}` and the small native
+hooks directly. There is no build-time patch application.
 
-应用 / 还原：
+- `History::createItem`: evaluates rules after message construction.
+- `HistoryItem`: caches the hidden state.
+- `HistoryView::Element::isHidden`: honors filtering and sponsored-message settings.
+- `Telegram/CMakeLists.txt`: enables the bridge on Windows.
 
-```sh
-scripts/apply-patches.sh desktop        # 或 Windows 下 apply-patches.bat
-git -C clients/desktop checkout -- .    # 还原（注意会丢掉未生成的补丁修改）
-```
+Other platforms retain the bridge stub until integrated. No generic hooking
+framework is needed for these explicit source-level calls.
 
-修改子模块后重新生成补丁：
+## Unified Rust library
 
-```sh
-git -C clients/desktop add -N Telegram/SourceFiles/chatcraft
-git -C clients/desktop diff > patches/desktop/0001-chatcraft-filter.patch
-```
+Upstream prepare builds tlottie and wallet-engine through a generated
+`tdesktop_rust` crate. After prepare, run:
 
-## 补丁内容
-
-| 位置                                                      | 改动                                                                                            |
-| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `Telegram/SourceFiles/chatcraft/chatcraft_filter.{h,cpp}` | 新增 FFI 桥：把 HistoryItem 序列化成 JSON 调 `chatcraft_filter_message()`，出错安全降级为 Allow |
-| `history/history.cpp` `createItem`                        | 消息创建时评估过滤，结果缓存到 item（覆盖历史加载 + 实时收信）                                  |
-| `history/history_item.h`                                  | 新增 `_filteredOut` 标记                                                                        |
-| `history/view/history_view_element.cpp` `isHidden()`      | 被过滤消息或被禁广告不渲染（复用现有 hidden 机制，布局/合并/跳转自动适配）                      |
-| `Telegram/CMakeLists.txt`                                 | 静态链接 `chatcraft_ffi.lib` + Rust 系统依赖库，`CHATCRAFT_ENABLED` 宏                          |
-
-## 期望的 FFI 库布局（构建前准备好）
-
-静态链接（内嵌进 Telegram.exe，无 dll 依赖）：
-
-```
-clients/desktop/chatcraft/
-└── lib/chatcraft_ffi.lib
+```text
+python scripts/build-desktop-rust.py --libraries <Libraries/win64>
 ```
 
-注意必须以静态 CRT 构建（`RUSTFLAGS="-C target-feature=+crt-static"`），
-与 tdesktop 的 MultiThreaded 运行时一致。
+Run this from an x64 MSVC Native Tools environment. The script uses upstream's
+private Rust installation and toolchain, adds the local `chatcraft-ffi` crate,
+and rebuilds the existing `tdesktop_rust.lib` with the same Win7 target and
+static CRT options. The C++ build links only that combined Rust static library.
+There is no separate Chatcraft static library or runtime DLL.
 
-CI 里由 `desktop-win.yml` 自动完成；本地：
+The CI workflow performs this automatically. Upstream may temporarily build a
+DLL for wallet-engine binding generation; that is not a distributed dependency.
+The resulting artifact contains `Telegram.exe` and the separate upstream
+`Updater.exe`, not an installer. Debug remains the current C++ configuration;
+this migration does not promise official-release binary size.
 
-```powershell
-$env:RUSTFLAGS="-C target-feature=+crt-static"
-cargo build -p chatcraft-ffi --release
-mkdir clients\desktop\chatcraft\lib -Force
-copy target\release\chatcraft_ffi.lib clients\desktop\chatcraft\lib\chatcraft_ffi.lib
-scripts\apply-patches.bat
-# 然后按 docs/building-win.md 构建（先跑 Telegram\build\prepare\win.bat）
-```
+## Versioning
 
-找不到静态库时 CMake 会以警告降级为无过滤构建（`CHATCRAFT_ENABLED` 未定义时桥接层为 stub）。
+Keep upstream `AppVersion` and `AppVersionStr` unchanged. About displays the
+upstream version followed by `+chatcraft.r1`. Override the integration revision
+with `-DCHATCRAFT_REVISION=2` when configuring. This suffix is display-only and
+does not modify Telegram protocol, update, or data-format version numbers.
 
-## 运行时配置
+## Updating upstream
 
-| 环境变量                                         | 作用                                 |
-| ------------------------------------------------ | ------------------------------------ |
-| `CHATCRAFT_LUA_SCRIPT`                           | Lua 过滤脚本路径（最简用法）         |
-| `CHATCRAFT_CONFIG_FILE`                          | EngineConfig JSON 文件（规则 + Lua） |
-| `CHATCRAFT_CONFIG`                               | 直接传 JSON 字符串                   |
-| `CHATCRAFT_DISABLE_ADS` / `CHATCRAFT_ENABLE_ADS` | 广告开关                             |
+1. In the Desktop fork, fetch the official upstream remote.
+2. Merge the chosen upstream commit into the integration branch; resolve conflicts.
+3. Push the fork commit.
+4. Update the root repository's desktop submodule pointer and run CI.
+5. Verify historical/new messages, edits, albums and sponsored messages manually.
 
-## 已知边界
+Do not automatically advance the root submodule to an untested fork head.
+Textual merge success is not evidence of behavioral compatibility.
 
-- 被隐藏消息仍计入未读数、会话列表最后一条消息（`setChatListMessage` 未跳过）——需要时再加补丁
-- 消息被编辑不会重新评估过滤（编辑走 `updateEditedMessage`，item 不重建）
-- `collapse` / `highlight` 动作目前 FFI 已返回但桌面端未实现渲染（hide 已生效）
-- sponsored 消息不走 `createItem`，由 `isHidden()` 里的 `AdsDisabled()` 直接拦截
+## Configuration
+
+- `CHATCRAFT_LUA_SCRIPT`: Lua filter path.
+- `CHATCRAFT_CONFIG_FILE`: EngineConfig JSON file.
+- `CHATCRAFT_CONFIG`: inline EngineConfig JSON (highest precedence).
+- `CHATCRAFT_DISABLE_ADS` / `CHATCRAFT_ENABLE_ADS`: sponsored-message settings.
+
+Restart the process after changing configuration. Run creation and filtering on
+the same thread; the Lua engine is not Send.
+
+## Current limitations
+
+Hidden messages still contribute to unread counts and chat-list previews.
+Message edits and rule changes do not currently re-evaluate existing items.
+Only `hide` has native rendering support; `collapse` and `highlight` are reserved.
+Sponsored messages are hidden at the view layer, not removed from the protocol.

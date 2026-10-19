@@ -7,23 +7,26 @@ crates/core   # 纯 Rust 跨平台核心：规则引擎、Lua 脚本、广告开
 crates/ffi    # C ABI (cdylib + staticlib)，供 Desktop/Android/iOS 调用
 scripts/      # 示例 Lua 脚本
 tests/fixtures # 跨平台共享测试用例
-clients/      # 官方客户端 fork (git submodule)，只放平台接入补丁
+clients/      # 官方客户端 fork (git submodule)，原生接入直接提交到 fork
 ```
 
 ## 环境变量
 
-| 变量 | 取值 | 作用 |
-| --- | --- | --- |
+| 变量                    | 取值       | 作用                                  |
+| ----------------------- | ---------- | ------------------------------------- |
 | `CHATCRAFT_DISABLE_ADS` | 1/true/yes | 禁用官方 sponsored 广告（默认即禁用） |
-| `CHATCRAFT_ENABLE_ADS` | 1/true/yes | 显式恢复官方广告 |
+| `CHATCRAFT_ENABLE_ADS`  | 1/true/yes | 显式恢复官方广告                      |
 
 ## 构建
 
-桌面（生成静态库/动态库）：
+独立核心库（不直接作为 Desktop 最终链接库）：
 
 ```sh
 cargo build -p chatcraft-ffi --release
 ```
+
+Windows Desktop 使用上游 `tdesktop_rust` 统一静态构建，见
+[Desktop 接入指南](desktop-integration.md)。无需额外 Chatcraft DLL。
 
 Android（需安装 NDK 和对应 target，或使用 cargo-ndk）：
 

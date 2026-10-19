@@ -44,21 +44,6 @@ jobs:
           echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
           echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
 
-      - name: Apply chatcraft patches.
-        shell: bash
-        run: scripts/apply-patches.sh desktop
-
-      - name: Build Rust FFI library.
-        shell: bash
-        run: |
-          rustup toolchain install stable --profile minimal
-          # 静态 CRT（与 tdesktop 的 MultiThreaded 一致），产出纯静态库内嵌进 exe
-          export RUSTFLAGS="-C target-feature=+crt-static"
-          cargo build -p chatcraft-ffi --release
-          mkdir -p TBuild/desktop/chatcraft/lib
-          cp target/release/chatcraft_ffi.lib TBuild/desktop/chatcraft/lib/chatcraft_ffi.lib
-          ls -la TBuild/desktop/chatcraft/lib
-
       - name: First set up.
         shell: bash
         run: |
@@ -70,6 +55,7 @@ jobs:
 
           echo "$(sha256sum $TBUILD/desktop/$PREPARE_PATH | awk '{ print $1 }')" >> CACHE_KEY.txt
           echo "$SDK" >> CACHE_KEY.txt
+          echo "${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/**', 'scripts/build-desktop-rust.py', '.github/workflows/desktop-win.yml') }}" >> CACHE_KEY.txt
           echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> $GITHUB_ENV
 
           git config --global user.email "ci@chatcraft.local"
@@ -123,6 +109,11 @@ jobs:
       - name: Libraries.
         run: |
           %TBUILD%\desktop\Telegram\build\prepare\win.bat skip-release silent
+
+      - name: Build unified Rust static library.
+        # 沿用 prepare 的工具链、Win7 target、build-std 和静态 CRT。
+        # 即使恢复了旧前缀缓存也必须重建，不能复用未包含 ChatCraft 的库。
+        run: python scripts/build-desktop-rust.py --libraries "%LibrariesPath%"
 
       # 立即保存缓存（即使后续步骤失败），避免重跑时重建 Qt 等耗时依赖
       - name: ThirdParty cache save.
