@@ -1,0 +1,2638 @@
+diff --git a/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp b/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp
+index 5d3c9b2d5c..64a5592a4b 100644
+--- a/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp
++++ b/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp
+@@ -8,31 +8,31 @@
+ #include "history/history_item.h"
+ #include "history/history_item_components.h"
+ 
++#include <QtCore/QCoreApplication>
+ #include <QtCore/QDir>
+ #include <QtCore/QFile>
++#include <QtCore/QJsonArray>
+ #include <QtCore/QJsonDocument>
+ #include <QtCore/QJsonObject>
+ 
+ namespace Chatcraft {
+ 
+-#ifdef CHATCRAFT_ENABLED
+-
+-extern "C" {
+-
+-void *chatcraft_engine_new(const char *config_json);
+-void chatcraft_engine_free(void *engine);
+-char *chatcraft_filter_message(const void *engine, const char *message_json);
+-void chatcraft_string_free(char *s);
+-bool chatcraft_ads_disabled();
+-
+-} // extern "C"
+-
+ namespace {
++QString g_scriptsDirectory;
++bool g_scriptsDirectoryEnabled = true;
+ 
+-void *g_engine = nullptr;
+-bool g_triedInit = false;
++QString DefaultScriptsDirectory() {
++  const auto override = QString::fromUtf8(qgetenv("CHATCRAFT_SCRIPT_DIR"));
++  if (!override.isEmpty()) {
++    return QDir::current().absoluteFilePath(override);
++  }
++  const auto base = QDir(QCoreApplication::applicationDirPath());
++  const auto scripts = base.absoluteFilePath(u"scripts"_q);
++  const auto legacy = base.absoluteFilePath(u"script"_q);
++  return !base.exists(u"scripts"_q) && QDir(legacy).exists() ? legacy : scripts;
++}
+ 
+-[[nodiscard]] std::string ReadConfig() {
++[[nodiscard]] std::string ReadExplicitConfig() {
+   if (const auto raw = qgetenv("CHATCRAFT_CONFIG"); !raw.isEmpty()) {
+     return raw.toStdString();
+   }
+@@ -53,6 +53,64 @@ bool g_triedInit = false;
+   return {};
+ }
+ 
++[[nodiscard]] std::string ReadConfig() {
++  const auto raw = QByteArray::fromStdString(ReadExplicitConfig());
++  auto error = QJsonParseError();
++  const auto document = QJsonDocument::fromJson(raw, &error);
++  if (!raw.isEmpty() &&
++      (error.error != QJsonParseError::NoError || !document.isObject())) {
++    LOG(("Chatcraft: invalid engine configuration."));
++    return raw.toStdString();
++  }
++  auto config = document.object();
++  if (!config.contains(QStringLiteral("script_dir"))) {
++    const auto directory = DefaultScriptsDirectory();
++    if (!QDir().mkpath(directory)) {
++      LOG(("Chatcraft: cannot create script directory: %1").arg(directory));
++    }
++    config.insert(QStringLiteral("script_dir"), directory);
++  }
++  const auto directory = config.value(u"script_dir"_q);
++  g_scriptsDirectoryEnabled = !directory.isNull();
++  g_scriptsDirectory =
++      directory.isString()
++          ? QDir::current().absoluteFilePath(directory.toString())
++          : DefaultScriptsDirectory();
++  return QJsonDocument(config).toJson(QJsonDocument::Compact).toStdString();
++}
++
++} // namespace
++
++QString ScriptsDirectory() {
++  EnsureInitialized();
++  return g_scriptsDirectory.isEmpty() ? DefaultScriptsDirectory()
++                                      : g_scriptsDirectory;
++}
++
++bool ScriptsDirectoryEnabled() {
++  EnsureInitialized();
++  return g_scriptsDirectoryEnabled;
++}
++
++#ifdef CHATCRAFT_ENABLED
++
++extern "C" {
++
++void *chatcraft_engine_new(const char *config_json);
++void chatcraft_engine_free(void *engine);
++char *chatcraft_filter_message(const void *engine, const char *message_json);
++void chatcraft_string_free(char *s);
++bool chatcraft_ads_disabled();
++char *chatcraft_scripts_status(const void *engine);
++char *chatcraft_filter_ui(const void *engine, const char *item_json);
++
++} // extern "C"
++
++namespace {
++
++void *g_engine = nullptr;
++bool g_triedInit = false;
++
+ [[nodiscard]] QJsonObject MessageToJson(not_null<const HistoryItem *> item) {
+   const auto peer = item->history()->peer;
+   const auto from = item->from();
+@@ -121,11 +179,63 @@ FilterAction FilterMessage(not_null<const HistoryItem *> item) {
+   return FilterAction::Allow;
+ }
+ 
++QJsonArray ScriptsStatus() {
++  EnsureInitialized();
++  if (!g_engine) {
++    return QJsonArray{
++        QJsonObject{{QStringLiteral("name"), QStringLiteral("Engine")},
++                    {QStringLiteral("loaded"), false},
++                    {QStringLiteral("error"),
++                     QStringLiteral("引擎初始化失败，请检查配置及日志。")}}};
++  }
++  const auto raw = chatcraft_scripts_status(g_engine);
++  const auto guard = gsl::finally([&] {
++    if (raw) {
++      chatcraft_string_free(raw);
++    }
++  });
++  const auto document =
++      raw ? QJsonDocument::fromJson(QByteArray(raw)) : QJsonDocument();
++  if (!document.isArray()) {
++    return QJsonArray{
++        QJsonObject{{u"name"_q, u"Engine"_q},
++                    {u"loaded"_q, false},
++                    {u"error"_q, u"无法获取脚本状态，请检查日志。"_q}}};
++  }
++  return document.array();
++}
++
++bool IsUiHidden(const QString &id, const QString &kind) {
++  EnsureInitialized();
++  if (!g_engine)
++    return false;
++  const auto json = QJsonDocument(QJsonObject{{QStringLiteral("id"), id},
++                                              {QStringLiteral("kind"), kind}})
++                        .toJson(QJsonDocument::Compact);
++  const auto raw = chatcraft_filter_ui(g_engine, json.constData());
++  if (!raw)
++    return false;
++  const auto guard = gsl::finally([&] { chatcraft_string_free(raw); });
++  return QJsonDocument::fromJson(QByteArray(raw))
++      .object()
++      .value(QStringLiteral("hide"))
++      .toBool();
++}
++
+ bool AdsDisabled() { return chatcraft_ads_disabled(); }
+ 
+ #else // CHATCRAFT_ENABLED
+ 
+-void EnsureInitialized() {}
++void EnsureInitialized() { static const auto config = ReadConfig(); }
++
++bool IsUiHidden(const QString &, const QString &) { return false; }
++QJsonArray ScriptsStatus() {
++  EnsureInitialized();
++  return QJsonArray{QJsonObject{
++      {u"name"_q, u"Engine"_q},
++      {u"loaded"_q, false},
++      {u"error"_q, u"此构建未启用 Chatcraft FFI，脚本引擎不可用。"_q}}};
++}
+ 
+ FilterAction FilterMessage(not_null<const HistoryItem *>) {
+   return FilterAction::Allow;
+diff --git a/Telegram/SourceFiles/chatcraft/chatcraft_filter.h b/Telegram/SourceFiles/chatcraft/chatcraft_filter.h
+index 0281b27821..7284d1aef9 100644
+--- a/Telegram/SourceFiles/chatcraft/chatcraft_filter.h
++++ b/Telegram/SourceFiles/chatcraft/chatcraft_filter.h
+@@ -2,6 +2,9 @@
+ // Maintained directly in the Chatcraft Desktop fork.
+ #pragma once
+ 
++#include <QtCore/QJsonArray>
++#include <QtCore/QString>
++
+ namespace HistoryView {
+ class Element;
+ }
+@@ -25,6 +28,12 @@ enum class FilterAction {
+ //   CHATCRAFT_DISABLE_ADS / CHATCRAFT_ENABLE_ADS 广告开关（Rust 侧读取）
+ void EnsureInitialized();
+ 
++// Stable semantic identifiers, independent of translated labels or row order.
++bool IsUiHidden(const QString &id, const QString &kind);
++QJsonArray ScriptsStatus();
++QString ScriptsDirectory();
++bool ScriptsDirectoryEnabled();
++
+ // 对一条消息求值。FFI 不可用或出错时返回 Allow（安全降级）。
+ FilterAction FilterMessage(not_null<const HistoryItem *> item);
+ 
+diff --git a/Telegram/SourceFiles/settings/sections/settings_main.cpp b/Telegram/SourceFiles/settings/sections/settings_main.cpp
+index 62e91ea63b..7c248a8fd6 100644
+--- a/Telegram/SourceFiles/settings/sections/settings_main.cpp
++++ b/Telegram/SourceFiles/settings/sections/settings_main.cpp
+@@ -16,6 +16,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "api/api_premium.h"
+ #include "api/api_sensitive_content.h"
+ #include "apiwrap.h"
++#include "chatcraft/chatcraft_filter.h"
+ #include "base/call_delayed.h"
+ #include "base/platform/base_platform_info.h"
+ #include "boxes/language_box.h"
+@@ -99,6 +100,13 @@ using namespace Builder;
+ 
+ constexpr auto kSugValidatePhone = "VALIDATE_PHONE_NUMBER"_cs;
+ 
++[[nodiscard]] bool HasVisiblePhoneValidationSuggestion(
++		not_null<Window::SessionController*> controller) {
++	return controller->session().promoSuggestions().current(
++		kSugValidatePhone.utf8())
++		&& !Chatcraft::IsUiHidden(u"dialogs.confirm_phone"_q, u"dialog"_q);
++}
++
+ class Cover final : public Ui::FixedHeightWidget {
+ public:
+ 	Cover(
+@@ -368,37 +376,45 @@ void BuildSectionButtons(SectionBuilder &builder) {
+ 	const auto showOther = builder.showOther();
+ 
+ 	if (!session->supportMode()) {
+-		builder.addButton({
+-			.title = tr::lng_settings_my_account(),
+-			.icon = { &st::menuIconProfile },
+-			.onClick = [=] {
+-				controller->showSection(
+-					Info::Stories::MakeMyProfile(session->user()));
+-			},
+-			.keywords = { u"profile"_q, u"edit"_q, u"information"_q },
+-		});
++		if (!Chatcraft::IsUiHidden(u"settings.my_account"_q, u"settings"_q)) {
++			builder.addButton({
++				.title = tr::lng_settings_my_account(),
++				.icon = { &st::menuIconProfile },
++				.onClick = [=] {
++					controller->showSection(
++						Info::Stories::MakeMyProfile(session->user()));
++				},
++				.keywords = { u"profile"_q, u"edit"_q, u"information"_q },
++			});
++		}
+ 	}
+ 
+-	builder.addSectionButton({
+-		.title = tr::lng_settings_section_notify(),
+-		.targetSection = NotificationsId(),
+-		.icon = { &st::menuIconNotifications },
+-		.keywords = { u"alerts"_q, u"sounds"_q, u"badge"_q },
+-	});
++	if (!Chatcraft::IsUiHidden(u"settings.notifications"_q, u"settings"_q)) {
++		builder.addSectionButton({
++			.title = tr::lng_settings_section_notify(),
++			.targetSection = NotificationsId(),
++			.icon = { &st::menuIconNotifications },
++			.keywords = { u"alerts"_q, u"sounds"_q, u"badge"_q },
++		});
++	}
+ 
+-	builder.addSectionButton({
+-		.title = tr::lng_settings_section_privacy(),
+-		.targetSection = PrivacySecurityId(),
+-		.icon = { &st::menuIconLock },
+-		.keywords = { u"security"_q, u"passcode"_q, u"password"_q, u"2fa"_q },
+-	});
++	if (!Chatcraft::IsUiHidden(u"settings.privacy"_q, u"settings"_q)) {
++		builder.addSectionButton({
++			.title = tr::lng_settings_section_privacy(),
++			.targetSection = PrivacySecurityId(),
++			.icon = { &st::menuIconLock },
++			.keywords = { u"security"_q, u"passcode"_q, u"password"_q, u"2fa"_q },
++		});
++	}
+ 
+-	builder.addSectionButton({
+-		.title = tr::lng_settings_section_chat_settings(),
+-		.targetSection = ChatId(),
+-		.icon = { &st::menuIconChatBubble },
+-		.keywords = { u"themes"_q, u"appearance"_q, u"stickers"_q },
+-	});
++	if (!Chatcraft::IsUiHidden(u"settings.chat"_q, u"settings"_q)) {
++		builder.addSectionButton({
++			.title = tr::lng_settings_section_chat_settings(),
++			.targetSection = ChatId(),
++			.icon = { &st::menuIconChatBubble },
++			.keywords = { u"themes"_q, u"appearance"_q, u"stickers"_q },
++		});
++	}
+ 
+ 	{ // Folders
+ 		const auto preload = [=] {
+@@ -425,58 +441,69 @@ void BuildSectionButtons(SectionBuilder &builder) {
+ 			preload();
+ 		}
+ 
+-		builder.addButton({
+-			.title = tr::lng_settings_section_filters(),
+-			.icon = { &st::menuIconShowInFolder },
+-			.onClick = [=] { showOther(FoldersId()); },
+-			.keywords = { u"filters"_q, u"tabs"_q },
+-			.shown = std::move(shownProducer),
+-		});
++		if (!Chatcraft::IsUiHidden(u"settings.folders"_q, u"settings"_q)) {
++			builder.addButton({
++				.title = tr::lng_settings_section_filters(),
++				.icon = { &st::menuIconShowInFolder },
++				.onClick = [=] { showOther(FoldersId()); },
++				.keywords = { u"filters"_q, u"tabs"_q },
++				.shown = std::move(shownProducer),
++			});
++		}
+ 	}
+ 
+-	builder.addSectionButton({
+-		.title = tr::lng_settings_advanced(),
+-		.targetSection = AdvancedId(),
+-		.icon = { &st::menuIconManage },
+-		.keywords = { u"performance"_q, u"proxy"_q, u"experimental"_q },
+-	});
++	if (!Chatcraft::IsUiHidden(u"settings.advanced"_q, u"settings"_q)) {
++		builder.addSectionButton({
++			.title = tr::lng_settings_advanced(),
++			.targetSection = AdvancedId(),
++			.icon = { &st::menuIconManage },
++			.keywords = { u"performance"_q, u"proxy"_q, u"experimental"_q },
++		});
++	}
+ 
+-	builder.addSectionButton({
+-		.title = tr::lng_settings_section_devices(),
+-		.targetSection = CallsId(),
+-		.icon = { &st::menuIconUnmute },
+-		.keywords = { u"sessions"_q, u"calls"_q },
+-	});
++	if (!Chatcraft::IsUiHidden(u"settings.devices"_q, u"settings"_q)) {
++		builder.addSectionButton({
++			.title = tr::lng_settings_section_devices(),
++			.targetSection = CallsId(),
++			.icon = { &st::menuIconUnmute },
++			.keywords = { u"sessions"_q, u"calls"_q },
++		});
++	}
+ 
+-	builder.addButton({
+-		.id = u"main/power"_q,
+-		.title = tr::lng_settings_power_menu(),
+-		.icon = { &st::menuIconPowerUsage },
+-		.onClick = [=] {
+-			controller->show(Box(PowerSavingBox, PowerSaving::Flags()));
+-		},
+-		.keywords = { u"battery"_q, u"animations"_q, u"power"_q, u"saving"_q },
+-	});
++	if (!Chatcraft::IsUiHidden(u"settings.power_saving"_q, u"settings"_q)) {
++		builder.addButton({
++			.id = u"main/power"_q,
++			.title = tr::lng_settings_power_menu(),
++			.icon = { &st::menuIconPowerUsage },
++			.onClick = [=] {
++				controller->show(Box(PowerSavingBox, PowerSaving::Flags()));
++			},
++			.keywords = { u"battery"_q, u"animations"_q, u"power"_q, u"saving"_q },
++		});
++	}
+ 
+-	builder.addButton({
+-		.id = u"main/language"_q,
+-		.title = tr::lng_settings_language(),
+-		.icon = { &st::menuIconTranslate },
+-		.label = rpl::single(
+-			Lang::GetInstance().id()
+-		) | rpl::then(
+-			Lang::GetInstance().idChanges()
+-		) | rpl::map([] { return Lang::GetInstance().nativeName(); }),
+-		.onClick = [=] {
+-			static auto Guard = base::binary_guard();
+-			Guard = LanguageBox::Show(controller);
+-		},
+-		.keywords = { u"translate"_q, u"localization"_q, u"language"_q },
+-	});
++	if (!Chatcraft::IsUiHidden(u"settings.language"_q, u"settings"_q)) {
++		builder.addButton({
++			.id = u"main/language"_q,
++			.title = tr::lng_settings_language(),
++			.icon = { &st::menuIconTranslate },
++			.label = rpl::single(
++				Lang::GetInstance().id()
++			) | rpl::then(
++				Lang::GetInstance().idChanges()
++			) | rpl::map([] { return Lang::GetInstance().nativeName(); }),
++			.onClick = [=] {
++				static auto Guard = base::binary_guard();
++				Guard = LanguageBox::Show(controller);
++			},
++			.keywords = { u"translate"_q, u"localization"_q, u"language"_q },
++		});
++	}
+ }
+ 
+ void BuildInterfaceScale(SectionBuilder &builder) {
+-	if (!HasInterfaceScale()) {
++	if (!HasInterfaceScale()
++		|| Chatcraft::IsUiHidden(u"settings.interface_scale"_q, u"settings"_q)) {
+ 		return;
+ 	}
+ 
+@@ -511,70 +538,80 @@ void BuildPremiumSection(SectionBuilder &builder) {
+ 	builder.addDivider();
+ 	builder.addSkip();
+ 
+-	builder.addPremiumButton({
+-		.id = u"main/premium"_q,
+-		.title = tr::lng_premium_summary_title(),
+-		.onClick = [=] {
+-			controller->setPremiumRef("settings");
+-			showOther(PremiumId());
+-		},
+-		.keywords = { u"subscription"_q },
+-	});
++	if (!Chatcraft::IsUiHidden(u"settings.premium"_q, u"settings"_q)) {
++		builder.addPremiumButton({
++			.id = u"main/premium"_q,
++			.title = tr::lng_premium_summary_title(),
++			.onClick = [=] {
++				controller->setPremiumRef("settings");
++				showOther(PremiumId());
++			},
++			.keywords = { u"subscription"_q },
++		});
++	}
+ 
+ 	session->credits().load();
+-	builder.addPremiumButton({
+-		.id = u"main/credits"_q,
+-		.title = tr::lng_settings_credits(),
+-		.label = session->credits().balanceValue(
+-		) | rpl::map([](CreditsAmount c) {
+-			return c
+-				? Lang::FormatCreditsAmountToShort(c).string
+-				: QString();
+-		}),
+-		.credits = true,
+-		.onClick = [=] {
+-			controller->setPremiumRef("settings");
+-			showOther(CreditsId());
+-		},
+-		.keywords = { u"stars"_q, u"balance"_q },
+-	});
++	if (!Chatcraft::IsUiHidden(u"settings.my_stars"_q, u"settings"_q)) {
++		builder.addPremiumButton({
++			.id = u"main/credits"_q,
++			.title = tr::lng_settings_credits(),
++			.label = session->credits().balanceValue(
++			) | rpl::map([](CreditsAmount c) {
++				return c
++					? Lang::FormatCreditsAmountToShort(c).string
++					: QString();
++			}),
++			.credits = true,
++			.onClick = [=] {
++				controller->setPremiumRef("settings");
++				showOther(CreditsId());
++			},
++			.keywords = { u"stars"_q, u"balance"_q },
++		});
++	}
+ 
+ 	session->credits().tonLoad();
+-	builder.addButton({
+-		.id = u"main/currency"_q,
+-		.title = tr::lng_settings_currency(),
+-		.icon = { &st::menuIconTon },
+-		.label = session->credits().tonBalanceValue(
+-		) | rpl::map([](CreditsAmount c) {
+-			return c ? Lang::FormatCreditsAmountToShort(c).string : u""_q;
+-		}),
+-		.onClick = [=] {
+-			controller->setPremiumRef("settings");
+-			showOther(CurrencyId());
+-		},
+-		.keywords = { u"ton"_q, u"crypto"_q, u"wallet"_q },
+-		.shown = session->credits().tonBalanceValue(
+-		) | rpl::map([](CreditsAmount c) { return !c.empty(); }),
+-	});
+-
+-	builder.addButton({
+-		.id = u"main/business"_q,
+-		.title = tr::lng_business_title(),
+-		.icon = { .icon = &st::menuIconShop },
+-		.onClick = [=] { showOther(BusinessId()); },
+-		.keywords = { u"work"_q, u"company"_q },
+-	});
++	if (!Chatcraft::IsUiHidden(u"settings.currency"_q, u"settings"_q)) {
++		builder.addButton({
++			.id = u"main/currency"_q,
++			.title = tr::lng_settings_currency(),
++			.icon = { &st::menuIconTon },
++			.label = session->credits().tonBalanceValue(
++			) | rpl::map([](CreditsAmount c) {
++				return c ? Lang::FormatCreditsAmountToShort(c).string : u""_q;
++			}),
++			.onClick = [=] {
++				controller->setPremiumRef("settings");
++				showOther(CurrencyId());
++			},
++			.keywords = { u"ton"_q, u"crypto"_q, u"wallet"_q },
++			.shown = session->credits().tonBalanceValue(
++			) | rpl::map([](CreditsAmount c) { return !c.empty(); }),
++		});
++	}
+ 
+-	if (session->premiumCanBuy()) {
++	if (!Chatcraft::IsUiHidden(u"settings.business"_q, u"settings"_q)) {
+ 		builder.addButton({
+-			.id = u"main/send-gift"_q,
+-			.title = tr::lng_settings_gift_premium(),
+-			.icon = { .icon = &st::menuIconGiftPremium, .newBadge = true },
+-			.onClick = [=] { Ui::ChooseStarGiftRecipient(controller); },
+-			.keywords = { u"present"_q, u"send"_q },
++			.id = u"main/business"_q,
++			.title = tr::lng_business_title(),
++			.icon = { .icon = &st::menuIconShop },
++			.onClick = [=] { showOther(BusinessId()); },
++			.keywords = { u"work"_q, u"company"_q },
+ 		});
+ 	}
+ 
++	if (session->premiumCanBuy()) {
++		if (!Chatcraft::IsUiHidden(u"settings.send_gift"_q, u"settings"_q)) {
++			builder.addButton({
++				.id = u"main/send-gift"_q,
++				.title = tr::lng_settings_gift_premium(),
++				.icon = { .icon = &st::menuIconGiftPremium, .newBadge = true },
++				.onClick = [=] { Ui::ChooseStarGiftRecipient(controller); },
++				.keywords = { u"present"_q, u"send"_q },
++			});
++		}
++	}
++
+ 	builder.addSkip();
+ }
+ 
+@@ -583,31 +620,37 @@ void BuildHelpSection(SectionBuilder &builder) {
+ 	builder.addSkip();
+ 
+ 	const auto controller = builder.controller();
+-	builder.addButton({
+-		.id = u"main/faq"_q,
+-		.title = tr::lng_settings_faq(),
+-		.icon = { &st::menuIconFaq },
+-		.onClick = [=] { OpenFaq(controller); },
+-		.keywords = { u"help"_q, u"support"_q, u"questions"_q },
+-	});
++	if (!Chatcraft::IsUiHidden(u"settings.faq"_q, u"settings"_q)) {
++		builder.addButton({
++			.id = u"main/faq"_q,
++			.title = tr::lng_settings_faq(),
++			.icon = { &st::menuIconFaq },
++			.onClick = [=] { OpenFaq(controller); },
++			.keywords = { u"help"_q, u"support"_q, u"questions"_q },
++		});
++	}
+ 
+-	builder.addButton({
+-		.id = u"main/features"_q,
+-		.title = tr::lng_settings_features(),
+-		.icon = { &st::menuIconEmojiObjects },
+-		.onClick = [] {
+-			UrlClickHandler::Open(tr::lng_telegram_features_url(tr::now));
+-		},
+-		.keywords = { u"tips"_q, u"tutorial"_q },
+-	});
++	if (!Chatcraft::IsUiHidden(u"settings.features"_q, u"settings"_q)) {
++		builder.addButton({
++			.id = u"main/features"_q,
++			.title = tr::lng_settings_features(),
++			.icon = { &st::menuIconEmojiObjects },
++			.onClick = [] {
++				UrlClickHandler::Open(tr::lng_telegram_features_url(tr::now));
++			},
++			.keywords = { u"tips"_q, u"tutorial"_q },
++		});
++	}
+ 
+-	builder.addButton({
+-		.id = u"main/ask-question"_q,
+-		.title = tr::lng_settings_ask_question(),
+-		.icon = { &st::menuIconDiscussion },
+-		.onClick = [=] { OpenAskQuestionConfirm(controller); },
+-		.keywords = { u"contact"_q, u"feedback"_q },
+-	});
++	if (!Chatcraft::IsUiHidden(u"settings.ask_question"_q, u"settings"_q)) {
++		builder.addButton({
++			.id = u"main/ask-question"_q,
++			.title = tr::lng_settings_ask_question(),
++			.icon = { &st::menuIconDiscussion },
++			.onClick = [=] { OpenAskQuestionConfirm(controller); },
++			.keywords = { u"contact"_q, u"feedback"_q },
++		});
++	}
+ 
+ 	builder.addSkip();
+ }
+@@ -834,8 +877,7 @@ void SetupValidatePhoneNumberSuggestion(
+ 		not_null<Window::SessionController*> controller,
+ 		not_null<Ui::VerticalLayout*> container,
+ 		Fn<void(Type)> showOther) {
+-	if (!controller->session().promoSuggestions().current(
+-			kSugValidatePhone.utf8())) {
++	if (!HasVisiblePhoneValidationSuggestion(controller)) {
+ 		return;
+ 	}
+ 	const auto mainWrap = container->add(
+@@ -953,8 +995,7 @@ void SetupValidatePasswordSuggestion(
+ 		Fn<void(Type)> showOther) {
+ 	if (!controller->session().promoSuggestions().current(
+ 			Data::PromoSuggestions::SugValidatePassword())
+-		|| controller->session().promoSuggestions().current(
+-			kSugValidatePhone.utf8())) {
++		|| HasVisiblePhoneValidationSuggestion(controller)) {
+ 		return;
+ 	}
+ 	const auto mainWrap = container->add(
+@@ -1026,7 +1067,8 @@ void SetupInterfaceScale(
+ 		not_null<Window::Controller*> window,
+ 		not_null<Ui::VerticalLayout*> container,
+ 		bool icon) {
+-	if (!HasInterfaceScale()) {
++	if (!HasInterfaceScale()
++		|| Chatcraft::IsUiHidden(u"settings.interface_scale"_q, u"settings"_q)) {
+ 		return;
+ 	}
+ 
+diff --git a/Telegram/SourceFiles/settings/settings_builder.cpp b/Telegram/SourceFiles/settings/settings_builder.cpp
+index 20b6e6dad9..efe0183976 100644
+--- a/Telegram/SourceFiles/settings/settings_builder.cpp
++++ b/Telegram/SourceFiles/settings/settings_builder.cpp
+@@ -8,11 +8,20 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "settings/settings_builder.h"
+ 
+ #include "apiwrap.h"
++#include "chatcraft/chatcraft_filter.h"
+ #include "lang/lang_keys.h"
+ #include "api/api_user_privacy.h"
+ #include "boxes/edit_privacy_box.h"
+ #include "main/main_session.h"
+ #include "settings/settings_common.h"
++#include "settings/sections/settings_advanced.h"
++#include "settings/sections/settings_business.h"
++#include "settings/sections/settings_calls.h"
++#include "settings/sections/settings_chat.h"
++#include "settings/sections/settings_credits.h"
++#include "settings/sections/settings_folders.h"
++#include "settings/sections/settings_notifications.h"
++#include "settings/sections/settings_premium.h"
+ #include "settings/sections/settings_privacy_security.h"
+ #include "ui/vertical_list.h"
+ #include "ui/widgets/buttons.h"
+@@ -22,9 +31,32 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "window/window_session_controller.h"
+ #include "styles/style_settings.h"
+ 
++#include <utility>
++
+ namespace Settings::Builder {
+ namespace {
+ 
++[[nodiscard]] bool IsSectionHidden(Type section) {
++	const auto ids = {
++		std::pair{ NotificationsId(), u"settings.notifications"_q },
++		std::pair{ PrivacySecurityId(), u"settings.privacy"_q },
++		std::pair{ ChatId(), u"settings.chat"_q },
++		std::pair{ FoldersId(), u"settings.folders"_q },
++		std::pair{ AdvancedId(), u"settings.advanced"_q },
++		std::pair{ CallsId(), u"settings.devices"_q },
++		std::pair{ PremiumId(), u"settings.premium"_q },
++		std::pair{ CreditsId(), u"settings.my_stars"_q },
++		std::pair{ CurrencyId(), u"settings.currency"_q },
++		std::pair{ BusinessId(), u"settings.business"_q },
++	};
++	for (const auto &[type, id] : ids) {
++		if (type == section) {
++			return Chatcraft::IsUiHidden(id, u"settings"_q);
++		}
++	}
++	return false;
++}
++
+ [[nodiscard]] QString ResolveTitle(rpl::producer<QString> title) {
+ 	auto result = QString();
+ 	auto lifetime = rpl::lifetime();
+@@ -99,7 +131,7 @@ std::vector<SearchEntry> SearchRegistry::collectAll(
+ 		not_null<Main::Session*> session) const {
+ 	auto result = std::vector<SearchEntry>();
+ 	for (const auto &[sectionId, meta] : _sections) {
+-		if (meta->parentId) {
++		if (meta->parentId && !IsSectionHidden(sectionId)) {
+ 			result.push_back({
+ 				.title = (*meta->title)(tr::now),
+ 				.section = sectionId,
+@@ -108,6 +140,9 @@ std::vector<SearchEntry> SearchRegistry::collectAll(
+ 		}
+ 	}
+ 	for (const auto &entry : _indexers) {
++		if (IsSectionHidden(entry.sectionId)) {
++			continue;
++		}
+ 		auto entries = entry.indexer(session);
+ 		result.insert(result.end(), entries.begin(), entries.end());
+ 	}
+diff --git a/Telegram/SourceFiles/window/window_main_menu.cpp b/Telegram/SourceFiles/window/window_main_menu.cpp
+index db8dcec6c6..298a49bf4f 100644
+--- a/Telegram/SourceFiles/window/window_main_menu.cpp
++++ b/Telegram/SourceFiles/window/window_main_menu.cpp
+@@ -11,14 +11,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "base/event_filter.h"
+ #include "base/qt_signal_producer.h"
+ #include "boxes/about_box.h"
+-#include "core/update_channel.h"
+ #include "boxes/peer_list_controllers.h"
+ #include "boxes/premium_preview_box.h"
+-#include "calls/group/calls_group_common.h"
+ #include "calls/calls_box_controller.h"
+ #include "calls/calls_instance.h"
++#include "calls/group/calls_group_common.h"
++#include "chatcraft/chatcraft_filter.h"
+ #include "core/application.h"
+ #include "core/click_handler_types.h"
++#include "core/update_channel.h"
+ #include "data/data_changes.h"
+ #include "data/data_document_media.h"
+ #include "data/data_folder.h"
+@@ -28,7 +29,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "data/data_user.h"
+ #include "info/info_memento.h"
+ #include "info/profile/info_profile_badge.h"
+-#include "settings/settings_common.h"
+ #include "info/profile/info_profile_emoji_status_panel.h"
+ #include "info/profile/info_profile_icon.h"
+ #include "info/stories/info_stories_widget.h"
+@@ -41,9 +41,19 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "mtproto/mtproto_config.h"
+ #include "settings/sections/settings_advanced.h"
+ #include "settings/sections/settings_calls.h"
++#include "settings/sections/settings_credits.h"
+ #include "settings/sections/settings_information.h"
++#include "settings/sections/settings_premium.h"
++#include "settings/settings_common.h"
+ #include "storage/localstorage.h"
+ #include "storage/storage_account.h"
++#include "styles/style_chat.h" // popupMenuExpandedSeparator
++#include "styles/style_layers.h"
++#include "styles/style_menu_icons.h"
++#include "styles/style_settings.h"
++#include "styles/style_wallet.h"
++#include "styles/style_window.h"
++#include "styles/style_window_main_menu.h"
+ #include "support/support_templates.h"
+ #include "tde2e/tde2e_api.h"
+ #include "tde2e/tde2e_integration.h"
+@@ -53,6 +63,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "ui/controls/userpic_button.h"
+ #include "ui/effects/snowflakes.h"
+ #include "ui/effects/toggle_arrow.h"
++#include "ui/layers/generic_box.h"
+ #include "ui/new_badges.h"
+ #include "ui/painter.h"
+ #include "ui/text/text_options.h"
+@@ -60,6 +71,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "ui/ui_utility.h"
+ #include "ui/unread_badge_paint.h"
+ #include "ui/vertical_list.h"
++#include "ui/widgets/labels.h"
+ #include "ui/widgets/menu/menu_add_action_callback_factory.h"
+ #include "ui/widgets/popup_menu.h"
+ #include "ui/widgets/scroll_area.h"
+@@ -71,1009 +83,977 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "window/window_main_menu_helpers.h"
+ #include "window/window_peer_menu.h"
+ #include "window/window_session_controller.h"
+-#include "styles/style_chat.h" // popupMenuExpandedSeparator
+-#include "styles/style_menu_icons.h"
+-#include "styles/style_settings.h"
+-#include "styles/style_wallet.h"
+-#include "styles/style_window.h"
+-#include "styles/style_window_main_menu.h"
+ 
+-#include <QtGui/QWindow>
++#include <QtCore/QDir>
++#include <QtCore/QJsonArray>
++#include <QtCore/QJsonObject>
++#include <QtCore/QUrl>
++#include <QtGui/QDesktopServices>
+ #include <QtGui/QScreen>
++#include <QtGui/QWindow>
+ 
+-#include <QtGui/QGuiApplication>
+ #include <QtGui/QClipboard>
++#include <QtGui/QGuiApplication>
+ 
+ namespace Window {
+ namespace {
+ 
+ constexpr auto kPlayStatusLimit = 2;
+ 
++void ShowScripts(not_null<SessionController *> controller) {
++  controller->show(Box([=](not_null<Ui::GenericBox *> box) {
++    const auto scripts = Chatcraft::ScriptsStatus();
++    box->setTitle(rpl::single(u"Lua 脚本管理"_q));
++    box->addRow(object_ptr<Ui::FlatLabel>(
++        box, rpl::single(u"脚本目录："_q + Chatcraft::ScriptsDirectory()),
++        st::boxLabel));
++    if (!Chatcraft::ScriptsDirectoryEnabled()) {
++      box->addRow(object_ptr<Ui::FlatLabel>(
++          box, rpl::single(u"目录自动加载已禁用（script_dir: null）。"_q),
++          st::boxLabel));
++    }
++    if (scripts.isEmpty()) {
++      box->addRow(object_ptr<Ui::FlatLabel>(
++          box, rpl::single(u"暂无 Lua 脚本"_q), st::boxLabel));
++    }
++    for (const auto &value : scripts) {
++      const auto script = value.toObject();
++      const auto error = script.value(u"error"_q).toString();
++      const auto loaded = script.value(u"loaded"_q).toBool();
++      const auto text = script.value(u"name"_q).toString() +
++                        (loaded ? u" — 已加载"_q : u" — 未加载 / 错误"_q) +
++                        u"\n"_q + script.value(u"path"_q).toString() +
++                        (error.isEmpty() ? QString() : u"\n"_q + error);
++      box->addRow(
++          object_ptr<Ui::FlatLabel>(box, rpl::single(text), st::boxLabel));
++    }
++    box->addRow(object_ptr<Ui::FlatLabel>(
++        box, rpl::single(u"添加、修改或删除脚本后，请重启应用以重新加载。"_q),
++        st::boxLabel));
++    box->addButton(rpl::single(u"打开脚本文件夹"_q), [=] {
++      const auto directory = Chatcraft::ScriptsDirectory();
++      if (!QDir().mkpath(directory)) {
++        controller->show(Ui::MakeInformBox(
++            rpl::single(u"无法创建脚本文件夹：\n"_q + directory)));
++      } else if (!QDesktopServices::openUrl(QUrl::fromLocalFile(directory))) {
++        controller->show(Ui::MakeInformBox(
++            rpl::single(u"无法打开脚本文件夹：\n"_q + directory)));
++      }
++    });
++    box->addButton(rpl::single(u"重启应用"_q), [] { Core::Restart(); });
++    box->addButton(tr::lng_close(), [=] { box->closeBox(); });
++  }));
++}
++
+ [[nodiscard]] bool CanCheckSpecialEvent() {
+-	static const auto result = [] {
+-		const auto now = QDate::currentDate();
+-		return (now.month() == 12) || (now.month() == 1 && now.day() == 1);
+-	}();
+-	return result;
++  static const auto result = [] {
++    const auto now = QDate::currentDate();
++    return (now.month() == 12) || (now.month() == 1 && now.day() == 1);
++  }();
++  return result;
+ }
+ 
+ [[nodiscard]] bool CheckSpecialEvent() {
+-	const auto now = QDate::currentDate();
+-	return (now.month() == 12 && now.day() >= 24)
+-		|| (now.month() == 1 && now.day() == 1);
++  const auto now = QDate::currentDate();
++  return (now.month() == 12 && now.day() >= 24) ||
++         (now.month() == 1 && now.day() == 1);
+ }
+ 
+-[[nodiscard]] rpl::producer<TextWithEntities> SetStatusLabel(
+-		not_null<Main::Session*> session) {
+-	const auto self = session->user();
+-	return session->changes().peerFlagsValue(
+-		self,
+-		Data::PeerUpdate::Flag::EmojiStatus
+-	) | rpl::map([=] {
+-		return !!self->emojiStatusId();
+-	}) | rpl::distinct_until_changed() | rpl::map([](bool has) {
+-		const auto makeLink = [](const QString &text) {
+-			return tr::link(text);
+-		};
+-		return (has
+-			? tr::lng_menu_change_status
+-			: tr::lng_menu_set_status)(makeLink);
+-	}) | rpl::flatten_latest();
++[[nodiscard]] rpl::producer<TextWithEntities>
++SetStatusLabel(not_null<Main::Session *> session) {
++  const auto self = session->user();
++  return session->changes().peerFlagsValue(
++             self, Data::PeerUpdate::Flag::EmojiStatus) |
++         rpl::map([=] { return !!self->emojiStatusId(); }) |
++         rpl::distinct_until_changed() | rpl::map([](bool has) {
++           const auto makeLink = [](const QString &text) {
++             return tr::link(text);
++           };
++           return (has ? tr::lng_menu_change_status
++                       : tr::lng_menu_set_status)(makeLink);
++         }) |
++         rpl::flatten_latest();
+ }
+ 
+ } // namespace
+ 
+ class MainMenu::ToggleAccountsButton final : public Ui::AbstractButton {
+ public:
+-	ToggleAccountsButton(QWidget *parent, not_null<Main::Account*> current);
++  ToggleAccountsButton(QWidget *parent, not_null<Main::Account *> current);
+ 
+-	[[nodiscard]] int rightSkip() const {
+-		return _rightSkip.current();
+-	}
+-	[[nodiscard]] rpl::producer<int> rightSkipValue() const {
+-		return _rightSkip.value();
+-	}
++  [[nodiscard]] int rightSkip() const { return _rightSkip.current(); }
++  [[nodiscard]] rpl::producer<int> rightSkipValue() const {
++    return _rightSkip.value();
++  }
+ 
+ private:
+-	void paintEvent(QPaintEvent *e) override;
+-	void paintUnreadBadge(Painter &p);
+-
+-	void validateUnreadBadge();
+-	[[nodiscard]] QString computeUnreadBadge() const;
++  void paintEvent(QPaintEvent *e) override;
++  void paintUnreadBadge(Painter &p);
+ 
+-	const not_null<Main::Account*> _current;
+-	rpl::variable<int> _rightSkip = 0;
+-	Ui::Animations::Simple _toggledAnimation;
+-	bool _toggled = false;
++  void validateUnreadBadge();
++  [[nodiscard]] QString computeUnreadBadge() const;
+ 
+-	QString _unreadBadge;
+-	bool _unreadBadgeStale = false;
++  const not_null<Main::Account *> _current;
++  rpl::variable<int> _rightSkip = 0;
++  Ui::Animations::Simple _toggledAnimation;
++  bool _toggled = false;
+ 
++  QString _unreadBadge;
++  bool _unreadBadgeStale = false;
+ };
+ 
+ class MainMenu::ResetScaleButton final : public Ui::AbstractButton {
+ public:
+-	ResetScaleButton(QWidget *parent);
++  ResetScaleButton(QWidget *parent);
+ 
+ protected:
+-	void paintEvent(QPaintEvent *e) override;
+-
+-	static constexpr auto kText = "100%";
++  void paintEvent(QPaintEvent *e) override;
+ 
++  static constexpr auto kText = "100%";
+ };
+ 
+ MainMenu::ToggleAccountsButton::ToggleAccountsButton(
+-	QWidget *parent,
+-	not_null<Main::Account*> current)
+-: AbstractButton(parent)
+-, _current(current) {
+-	rpl::single(rpl::empty) | rpl::then(
+-		Core::App().unreadBadgeChanges()
+-	) | rpl::on_next([=] {
+-		_unreadBadgeStale = true;
+-		if (!_toggled) {
+-			validateUnreadBadge();
+-			update();
+-		}
+-	}, lifetime());
+-
+-	auto &settings = Core::App().settings();
+-	if (Core::App().domain().accounts().size() < 2
+-		&& settings.mainMenuAccountsShown()) {
+-		settings.setMainMenuAccountsShown(false);
+-	}
+-	settings.mainMenuAccountsShownValue(
+-	) | rpl::filter([=](bool value) {
+-		return (_toggled != value);
+-	}) | rpl::on_next([=](bool value) {
+-		_toggled = value;
+-		_toggledAnimation.start(
+-			[=] { update(); },
+-			_toggled ? 0. : 1.,
+-			_toggled ? 1. : 0.,
+-			st::slideWrapDuration);
+-		validateUnreadBadge();
+-	}, lifetime());
+-	_toggledAnimation.stop();
++    QWidget *parent, not_null<Main::Account *> current)
++    : AbstractButton(parent), _current(current) {
++  rpl::single(rpl::empty) | rpl::then(Core::App().unreadBadgeChanges()) |
++      rpl::on_next(
++          [=] {
++            _unreadBadgeStale = true;
++            if (!_toggled) {
++              validateUnreadBadge();
++              update();
++            }
++          },
++          lifetime());
++
++  auto &settings = Core::App().settings();
++  if (Core::App().domain().accounts().size() < 2 &&
++      settings.mainMenuAccountsShown()) {
++    settings.setMainMenuAccountsShown(false);
++  }
++  settings.mainMenuAccountsShownValue() |
++      rpl::filter([=](bool value) { return (_toggled != value); }) |
++      rpl::on_next(
++          [=](bool value) {
++            _toggled = value;
++            _toggledAnimation.start([=] { update(); }, _toggled ? 0. : 1.,
++                                    _toggled ? 1. : 0., st::slideWrapDuration);
++            validateUnreadBadge();
++          },
++          lifetime());
++  _toggledAnimation.stop();
+ }
+ 
+ void MainMenu::ToggleAccountsButton::paintEvent(QPaintEvent *e) {
+-	auto p = Painter(this);
++  auto p = Painter(this);
+ 
+-	const auto path = Ui::ToggleUpDownArrowPath(
+-		0. + width() - st::mainMenuTogglePosition.x(),
+-		0. + height() - st::mainMenuTogglePosition.y(),
+-		st::mainMenuToggleSize,
+-		st::mainMenuToggleFourStrokes,
+-		_toggledAnimation.value(_toggled ? 1. : 0.));
++  const auto path = Ui::ToggleUpDownArrowPath(
++      0. + width() - st::mainMenuTogglePosition.x(),
++      0. + height() - st::mainMenuTogglePosition.y(), st::mainMenuToggleSize,
++      st::mainMenuToggleFourStrokes,
++      _toggledAnimation.value(_toggled ? 1. : 0.));
+ 
+-	auto hq = PainterHighQualityEnabler(p);
+-	p.fillPath(path, st::windowSubTextFg);
++  auto hq = PainterHighQualityEnabler(p);
++  p.fillPath(path, st::windowSubTextFg);
+ 
+-	paintUnreadBadge(p);
++  paintUnreadBadge(p);
+ }
+ 
+ void MainMenu::ToggleAccountsButton::paintUnreadBadge(Painter &p) {
+-	const auto progress = 1. - _toggledAnimation.value(_toggled ? 1. : 0.);
+-	if (!progress) {
+-		return;
+-	}
+-	validateUnreadBadge();
+-	if (_unreadBadge.isEmpty()) {
+-		return;
+-	}
+-
+-	auto st = Settings::Badge::Style();
+-	const auto right = width()
+-		- st::mainMenuTogglePosition.x()
+-		- st::mainMenuToggleSize * 3;
+-	const auto top = height()
+-		- st::mainMenuTogglePosition.y()
+-		- st::mainMenuBadgeSize / 2;
+-	p.setOpacity(progress);
+-	Ui::PaintUnreadBadge(p, _unreadBadge, right, top, st);
++  const auto progress = 1. - _toggledAnimation.value(_toggled ? 1. : 0.);
++  if (!progress) {
++    return;
++  }
++  validateUnreadBadge();
++  if (_unreadBadge.isEmpty()) {
++    return;
++  }
++
++  auto st = Settings::Badge::Style();
++  const auto right =
++      width() - st::mainMenuTogglePosition.x() - st::mainMenuToggleSize * 3;
++  const auto top =
++      height() - st::mainMenuTogglePosition.y() - st::mainMenuBadgeSize / 2;
++  p.setOpacity(progress);
++  Ui::PaintUnreadBadge(p, _unreadBadge, right, top, st);
+ }
+ 
+ void MainMenu::ToggleAccountsButton::validateUnreadBadge() {
+-	const auto base = st::mainMenuTogglePosition.x()
+-		+ 2 * st::mainMenuToggleSize;
+-	if (_toggled) {
+-		_rightSkip = base;
+-		return;
+-	} else if (!_unreadBadgeStale) {
+-		return;
+-	}
+-	_unreadBadge = computeUnreadBadge();
+-
+-	auto skip = base;
+-	if (!_unreadBadge.isEmpty()) {
+-		const auto st = Settings::Badge::Style();
+-		skip += 2 * st::mainMenuToggleSize
+-			+ Ui::CountUnreadBadgeSize(_unreadBadge, st).width();
+-	}
+-	_rightSkip = skip;
++  const auto base = st::mainMenuTogglePosition.x() + 2 * st::mainMenuToggleSize;
++  if (_toggled) {
++    _rightSkip = base;
++    return;
++  } else if (!_unreadBadgeStale) {
++    return;
++  }
++  _unreadBadge = computeUnreadBadge();
++
++  auto skip = base;
++  if (!_unreadBadge.isEmpty()) {
++    const auto st = Settings::Badge::Style();
++    skip += 2 * st::mainMenuToggleSize +
++            Ui::CountUnreadBadgeSize(_unreadBadge, st).width();
++  }
++  _rightSkip = skip;
+ }
+ 
+ QString MainMenu::ToggleAccountsButton::computeUnreadBadge() const {
+-	const auto state = OtherAccountsUnreadStateCurrent(_current);
+-	return state.allMuted
+-		? QString()
+-		: (state.count > 0)
+-		? Lang::FormatCountToShort(state.count).string
+-		: QString();
++  const auto state = OtherAccountsUnreadStateCurrent(_current);
++  return state.allMuted      ? QString()
++         : (state.count > 0) ? Lang::FormatCountToShort(state.count).string
++                             : QString();
+ }
+ 
+ MainMenu::ResetScaleButton::ResetScaleButton(QWidget *parent)
+-: AbstractButton(parent) {
+-	const auto margin = st::mainMenuCloudButton.height
+-		- st::mainMenuCloudSize;
+-	const auto textWidth = st::mainMenuResetScaleFont->width(kText);
+-	const auto innerWidth = st::mainMenuResetScaleLeft
+-		+ textWidth
+-		+ st::mainMenuResetScaleRight;
+-	const auto width = margin + innerWidth;
+-	resize(width, st::mainMenuCloudButton.height);
++    : AbstractButton(parent) {
++  const auto margin = st::mainMenuCloudButton.height - st::mainMenuCloudSize;
++  const auto textWidth = st::mainMenuResetScaleFont->width(kText);
++  const auto innerWidth =
++      st::mainMenuResetScaleLeft + textWidth + st::mainMenuResetScaleRight;
++  const auto width = margin + innerWidth;
++  resize(width, st::mainMenuCloudButton.height);
+ }
+ 
+ void MainMenu::ResetScaleButton::paintEvent(QPaintEvent *e) {
+-	Painter p(this);
+-
+-	const auto innerHeight = st::mainMenuCloudSize;
+-	const auto radius = innerHeight / 2;
+-	const auto margin = st::mainMenuCloudButton.height
+-		- st::mainMenuCloudSize;
+-	const auto textWidth = st::mainMenuResetScaleFont->width(kText);
+-	const auto innerWidth = st::mainMenuResetScaleLeft
+-		+ textWidth
+-		+ st::mainMenuResetScaleRight;
+-	const auto left = margin / 2;
+-	const auto top = margin / 2;
+-	p.setPen(Qt::NoPen);
+-	p.setBrush(st::mainMenuCloudBg);
+-	p.drawRoundedRect(left, top, innerWidth, innerHeight, radius, radius);
+-
+-	st::settingsIconInterfaceScale.paint(
+-		p,
+-		left + st::mainMenuResetScaleIconLeft,
+-		top + ((innerHeight - st::settingsIconInterfaceScale.height()) / 2),
+-		width(),
+-		st::mainMenuCloudFg->c);
+-
+-	p.setFont(st::mainMenuResetScaleFont);
+-	p.setPen(st::mainMenuCloudFg);
+-	p.drawText(
+-		left + st::mainMenuResetScaleLeft,
+-		top + st::mainMenuResetScaleTop + st::mainMenuResetScaleFont->ascent,
+-		kText);
++  Painter p(this);
++
++  const auto innerHeight = st::mainMenuCloudSize;
++  const auto radius = innerHeight / 2;
++  const auto margin = st::mainMenuCloudButton.height - st::mainMenuCloudSize;
++  const auto textWidth = st::mainMenuResetScaleFont->width(kText);
++  const auto innerWidth =
++      st::mainMenuResetScaleLeft + textWidth + st::mainMenuResetScaleRight;
++  const auto left = margin / 2;
++  const auto top = margin / 2;
++  p.setPen(Qt::NoPen);
++  p.setBrush(st::mainMenuCloudBg);
++  p.drawRoundedRect(left, top, innerWidth, innerHeight, radius, radius);
++
++  st::settingsIconInterfaceScale.paint(
++      p, left + st::mainMenuResetScaleIconLeft,
++      top + ((innerHeight - st::settingsIconInterfaceScale.height()) / 2),
++      width(), st::mainMenuCloudFg->c);
++
++  p.setFont(st::mainMenuResetScaleFont);
++  p.setPen(st::mainMenuCloudFg);
++  p.drawText(left + st::mainMenuResetScaleLeft,
++             top + st::mainMenuResetScaleTop +
++                 st::mainMenuResetScaleFont->ascent,
++             kText);
+ }
+ 
+-MainMenu::MainMenu(
+-	QWidget *parent,
+-	not_null<SessionController*> controller)
+-: LayerWidget(parent)
+-, _controller(controller)
+-, _userpicButton(
+-	this,
+-	_controller->session().user(),
+-	st::mainMenuUserpic)
+-, _toggleAccounts(this, &controller->session().account())
+-, _setEmojiStatus(this, SetStatusLabel(&controller->session()))
+-, _emojiStatusPanel(std::make_unique<Info::Profile::EmojiStatusPanel>())
+-, _badge(std::make_unique<Info::Profile::Badge>(
+-	this,
+-	st::settingsInfoPeerBadge,
+-	&controller->session(),
+-	Info::Profile::BadgeContentForPeer(controller->session().user()),
+-	_emojiStatusPanel.get(),
+-	[=] { return controller->isGifPausedAtLeastFor(GifPauseReason::Layer); },
+-	kPlayStatusLimit,
+-	Info::Profile::BadgeType::Premium))
+-, _scroll(this, st::defaultSolidScroll)
+-, _inner(_scroll->setOwnedWidget(
+-	object_ptr<Ui::VerticalLayout>(_scroll.data())))
+-, _topShadowSkip(_inner->add(
+-	object_ptr<Ui::FixedHeightWidget>(_inner.get(), st::lineWidth)))
+-, _accounts(_inner->add(object_ptr<Ui::SlideWrap<Ui::VerticalLayout>>(
+-	_inner.get(),
+-	object_ptr<Ui::VerticalLayout>(_inner.get()))))
+-, _shadow(_inner->add(object_ptr<Ui::SlideWrap<Ui::PlainShadow>>(
+-	_inner.get(),
+-	object_ptr<Ui::PlainShadow>(_inner.get()))))
+-, _menu(_inner->add(
+-	object_ptr<Ui::VerticalLayout>(_inner.get()),
+-	{ 0, st::mainMenuSkip, 0, 0 }))
+-, _footer(_inner->add(object_ptr<Ui::RpWidget>(_inner.get())))
+-, _telegram(
+-	Ui::CreateChild<Ui::FlatLabel>(_footer.get(), st::mainMenuTelegramLabel))
+-, _version(AddVersionLabel(_footer)) {
+-	setAttribute(Qt::WA_OpaquePaintEvent);
+-
+-	setupUserpicButton();
+-	setupAccountsToggle();
+-	setupSetEmojiStatus();
+-	setupAccounts();
+-	setupArchive();
+-	setupMenu();
+-
+-	const auto shadow = Ui::CreateChild<Ui::PlainShadow>(this);
+-	widthValue(
+-	) | rpl::on_next([=](int width) {
+-		const auto line = st::lineWidth;
+-		shadow->setGeometry(0, st::mainMenuCoverHeight - line, width, line);
+-	}, shadow->lifetime());
+-
+-	_nightThemeSwitch.setCallback([this] {
+-		Expects(_nightThemeToggle != nullptr);
+-
+-		const auto nightMode = Window::Theme::IsNightMode();
+-		if (_nightThemeToggle->toggled() != nightMode) {
+-			Window::Theme::ToggleNightMode();
+-			Window::Theme::KeepApplied();
+-		}
+-	});
+-
+-	_footer->heightValue(
+-	) | rpl::on_next([=] {
+-		_telegram->moveToLeft(st::mainMenuFooterLeft, _footer->height() - st::mainMenuTelegramBottom - _telegram->height());
+-		_version->moveToLeft(st::mainMenuFooterLeft, _footer->height() - st::mainMenuVersionBottom - _version->height());
+-	}, _footer->lifetime());
+-
+-	rpl::combine(
+-		heightValue(),
+-		_inner->heightValue()
+-	) | rpl::on_next([=] {
+-		updateInnerControlsGeometry();
+-	}, _inner->lifetime());
+-
+-	parentResized();
+-
+-	_telegram->setMarkedText(tr::link(
+-		u"Telegram Desktop"_q,
+-		u"https://desktop.telegram.org"_q));
+-	_telegram->setLinksTrusted();
+-	// The canary version is too long for the "Version {version}" form.
+-	_version->setMarkedText(
+-		tr::link(
+-			Core::BuildIsCanary
+-				? currentVersionShortText()
+-				: tr::lng_settings_current_version(
+-					tr::now,
+-					lt_version,
+-					currentVersionShortText()),
+-			1) // Link 1.
+-		.append(QChar(' '))
+-		.append(QChar(8211))
+-		.append(QChar(' '))
+-		.append(tr::link(tr::lng_menu_about(tr::now), 2))); // Link 2.
+-	_version->setLink(
+-		1,
+-		std::make_shared<UrlClickHandler>(Core::App().changelogLink()));
+-	_version->setLink(
+-		2,
+-		std::make_shared<LambdaClickHandler>([=] {
+-			controller->show(Box(AboutBox));
+-		}));
+-
+-	rpl::combine(
+-		_toggleAccounts->rightSkipValue(),
+-		rpl::single(rpl::empty) | rpl::then(_badge->updated())
+-	) | rpl::on_next([=] {
+-		moveBadge();
+-	}, lifetime());
+-	_badge->setPremiumClickCallback([=] {
+-		chooseEmojiStatus();
+-	});
+-
+-	_controller->session().downloaderTaskFinished(
+-	) | rpl::on_next([=] {
+-		update();
+-	}, lifetime());
+-
+-	initResetScaleButton();
+-
+-	if (CanCheckSpecialEvent() && CheckSpecialEvent()) {
+-		const auto snowLifetime = lifetime().make_state<rpl::lifetime>();
+-		const auto rebuild = [=] {
+-			const auto snowRaw = Ui::CreateChild<Ui::RpWidget>(this);
+-			const auto snow = snowLifetime->make_state<Ui::Snowflakes>(
+-				[=](const QRect &r) { snowRaw->update(r); });
+-			snow->setBrush(QColor(230, 230, 230));
+-			_showFinished.value(
+-			) | rpl::on_next([=](bool shown) {
+-				snow->setPaused(!shown);
+-			}, snowRaw->lifetime());
+-			snowRaw->paintRequest(
+-			) | rpl::on_next([=](const QRect &r) {
+-				auto p = Painter(snowRaw);
+-				p.fillRect(r, st::mainMenuBg);
+-				drawName(p);
+-				snow->paint(p, snowRaw->rect());
+-			}, snowRaw->lifetime());
+-			widthValue(
+-			) | rpl::on_next([=](int width) {
+-				snowRaw->setGeometry(0, 0, width, st::mainMenuCoverHeight);
+-			}, snowRaw->lifetime());
+-			snowRaw->show();
+-			snowRaw->lower();
+-			snowRaw->setAttribute(Qt::WA_TransparentForMouseEvents);
+-			snowLifetime->add([=] { base::unique_qptr{ snowRaw }; });
+-		};
+-		Window::Theme::IsNightModeValue(
+-		) | rpl::on_next([=](bool isNightMode) {
+-			snowLifetime->destroy();
+-			if (isNightMode) {
+-				rebuild();
+-			}
+-		}, lifetime());
+-	}
+-
+-	setupSwipe();
++MainMenu::MainMenu(QWidget *parent, not_null<SessionController *> controller)
++    : LayerWidget(parent), _controller(controller),
++      _userpicButton(this, _controller->session().user(), st::mainMenuUserpic),
++      _toggleAccounts(this, &controller->session().account()),
++      _setEmojiStatus(this, SetStatusLabel(&controller->session())),
++      _emojiStatusPanel(std::make_unique<Info::Profile::EmojiStatusPanel>()),
++      _badge(std::make_unique<Info::Profile::Badge>(
++          this, st::settingsInfoPeerBadge, &controller->session(),
++          Info::Profile::BadgeContentForPeer(controller->session().user()),
++          _emojiStatusPanel.get(),
++          [=] {
++            return controller->isGifPausedAtLeastFor(GifPauseReason::Layer);
++          },
++          kPlayStatusLimit, Info::Profile::BadgeType::Premium)),
++      _scroll(this, st::defaultSolidScroll),
++      _inner(_scroll->setOwnedWidget(
++          object_ptr<Ui::VerticalLayout>(_scroll.data()))),
++      _topShadowSkip(_inner->add(
++          object_ptr<Ui::FixedHeightWidget>(_inner.get(), st::lineWidth))),
++      _accounts(_inner->add(object_ptr<Ui::SlideWrap<Ui::VerticalLayout>>(
++          _inner.get(), object_ptr<Ui::VerticalLayout>(_inner.get())))),
++      _shadow(_inner->add(object_ptr<Ui::SlideWrap<Ui::PlainShadow>>(
++          _inner.get(), object_ptr<Ui::PlainShadow>(_inner.get())))),
++      _menu(_inner->add(object_ptr<Ui::VerticalLayout>(_inner.get()),
++                        {0, st::mainMenuSkip, 0, 0})),
++      _footer(_inner->add(object_ptr<Ui::RpWidget>(_inner.get()))),
++      _telegram(Ui::CreateChild<Ui::FlatLabel>(_footer.get(),
++                                               st::mainMenuTelegramLabel)),
++      _version(AddVersionLabel(_footer)) {
++  setAttribute(Qt::WA_OpaquePaintEvent);
++
++  setupUserpicButton();
++  setupAccountsToggle();
++  setupSetEmojiStatus();
++  setupAccounts();
++  setupArchive();
++  setupMenu();
++
++  const auto shadow = Ui::CreateChild<Ui::PlainShadow>(this);
++  widthValue() |
++      rpl::on_next(
++          [=](int width) {
++            const auto line = st::lineWidth;
++            shadow->setGeometry(0, st::mainMenuCoverHeight - line, width, line);
++          },
++          shadow->lifetime());
++
++  _nightThemeSwitch.setCallback([this] {
++    Expects(_nightThemeToggle != nullptr);
++
++    const auto nightMode = Window::Theme::IsNightMode();
++    if (_nightThemeToggle->toggled() != nightMode) {
++      Window::Theme::ToggleNightMode();
++      Window::Theme::KeepApplied();
++    }
++  });
++
++  _footer->heightValue() |
++      rpl::on_next(
++          [=] {
++            _telegram->moveToLeft(st::mainMenuFooterLeft,
++                                  _footer->height() -
++                                      st::mainMenuTelegramBottom -
++                                      _telegram->height());
++            _version->moveToLeft(st::mainMenuFooterLeft,
++                                 _footer->height() - st::mainMenuVersionBottom -
++                                     _version->height());
++          },
++          _footer->lifetime());
++
++  rpl::combine(heightValue(), _inner->heightValue()) |
++      rpl::on_next([=] { updateInnerControlsGeometry(); }, _inner->lifetime());
++
++  parentResized();
++
++  _telegram->setMarkedText(
++      tr::link(u"Telegram Desktop"_q, u"https://desktop.telegram.org"_q));
++  _telegram->setLinksTrusted();
++  // The canary version is too long for the "Version {version}" form.
++  _version->setMarkedText(
++      tr::link(Core::BuildIsCanary
++                   ? currentVersionShortText()
++                   : tr::lng_settings_current_version(
++                         tr::now, lt_version, currentVersionShortText()),
++               1) // Link 1.
++          .append(QChar(' '))
++          .append(QChar(8211))
++          .append(QChar(' '))
++          .append(tr::link(tr::lng_menu_about(tr::now), 2))); // Link 2.
++  _version->setLink(
++      1, std::make_shared<UrlClickHandler>(Core::App().changelogLink()));
++  _version->setLink(2, std::make_shared<LambdaClickHandler>(
++                           [=] { controller->show(Box(AboutBox)); }));
++
++  rpl::combine(_toggleAccounts->rightSkipValue(),
++               rpl::single(rpl::empty) | rpl::then(_badge->updated())) |
++      rpl::on_next([=] { moveBadge(); }, lifetime());
++  _badge->setPremiumClickCallback([=] { chooseEmojiStatus(); });
++
++  _controller->session().downloaderTaskFinished() |
++      rpl::on_next([=] { update(); }, lifetime());
++
++  initResetScaleButton();
++
++  if (CanCheckSpecialEvent() && CheckSpecialEvent()) {
++    const auto snowLifetime = lifetime().make_state<rpl::lifetime>();
++    const auto rebuild = [=] {
++      const auto snowRaw = Ui::CreateChild<Ui::RpWidget>(this);
++      const auto snow = snowLifetime->make_state<Ui::Snowflakes>(
++          [=](const QRect &r) { snowRaw->update(r); });
++      snow->setBrush(QColor(230, 230, 230));
++      _showFinished.value() |
++          rpl::on_next([=](bool shown) { snow->setPaused(!shown); },
++                       snowRaw->lifetime());
++      snowRaw->paintRequest() | rpl::on_next(
++                                    [=](const QRect &r) {
++                                      auto p = Painter(snowRaw);
++                                      p.fillRect(r, st::mainMenuBg);
++                                      drawName(p);
++                                      snow->paint(p, snowRaw->rect());
++                                    },
++                                    snowRaw->lifetime());
++      widthValue() |
++          rpl::on_next(
++              [=](int width) {
++                snowRaw->setGeometry(0, 0, width, st::mainMenuCoverHeight);
++              },
++              snowRaw->lifetime());
++      snowRaw->show();
++      snowRaw->lower();
++      snowRaw->setAttribute(Qt::WA_TransparentForMouseEvents);
++      snowLifetime->add([=] { base::unique_qptr{snowRaw}; });
++    };
++    Window::Theme::IsNightModeValue() | rpl::on_next(
++                                            [=](bool isNightMode) {
++                                              snowLifetime->destroy();
++                                              if (isNightMode) {
++                                                rebuild();
++                                              }
++                                            },
++                                            lifetime());
++  }
++
++  setupSwipe();
+ }
+ 
+ MainMenu::~MainMenu() = default;
+ 
+ void MainMenu::moveBadge() {
+-	if (!_badge->widget()) {
+-		return;
+-	}
+-	const auto available = width()
+-		- st::mainMenuCoverNameLeft
+-		- _toggleAccounts->rightSkip()
+-		- _badge->widget()->width();
+-	const auto left = st::mainMenuCoverNameLeft
+-		+ std::min(_name.maxWidth() + st::semiboldFont->spacew, available);
+-	_badge->move(
+-		left,
+-		st::mainMenuCoverNameTop,
+-		st::mainMenuCoverNameTop + st::semiboldFont->height);
++  if (!_badge->widget()) {
++    return;
++  }
++  const auto available = width() - st::mainMenuCoverNameLeft -
++                         _toggleAccounts->rightSkip() -
++                         _badge->widget()->width();
++  const auto left =
++      st::mainMenuCoverNameLeft +
++      std::min(_name.maxWidth() + st::semiboldFont->spacew, available);
++  _badge->move(left, st::mainMenuCoverNameTop,
++               st::mainMenuCoverNameTop + st::semiboldFont->height);
+ }
+ 
+ void MainMenu::setupArchive() {
+-	using namespace Settings;
+-
+-	const auto controller = _controller;
+-	const auto folder = [=] {
+-		return controller->session().data().folderLoaded(Data::Folder::kId);
+-	};
+-	const auto showArchive = [=](Qt::KeyboardModifiers modifiers) {
+-		if (const auto f = folder()) {
+-			if (modifiers & Qt::ControlModifier) {
+-				controller->showInNewWindow(Window::SeparateId(
+-					Window::SeparateType::Archive,
+-					&controller->session()));
+-			} else {
+-				controller->openFolder(f);
+-			}
+-			controller->window().hideSettingsAndLayer();
+-			controller->removeLayerBlackout();
+-		}
+-	};
+-	const auto checkArchive = [=] {
+-		const auto f = folder();
+-		return f
+-			&& (!f->chatsList()->empty() || f->storiesCount() > 0)
+-			&& controller->session().settings().archiveInMainMenu();
+-	};
+-
+-	const auto wrap = _menu->add(
+-		object_ptr<Ui::SlideWrap<Ui::VerticalLayout>>(
+-			_menu,
+-			object_ptr<Ui::VerticalLayout>(_menu)));
+-	const auto inner = wrap->entity();
+-	wrap->toggle(checkArchive(), anim::type::instant);
+-
+-	const auto button = AddButtonWithIcon(
+-		inner,
+-		tr::lng_archived_name(),
+-		st::mainMenuButton,
+-		{ &st::menuIconArchiveOpen });
+-	inner->add(
+-		object_ptr<Ui::PlainShadow>(inner),
+-		{ 0, st::mainMenuSkip, 0, st::mainMenuSkip });
+-	button->setAcceptBoth(true);
+-	button->clicks(
+-	) | rpl::on_next([=](Qt::MouseButton which) {
+-		if (which == Qt::LeftButton) {
+-			showArchive(button->clickModifiers());
+-			return;
+-		} else if (which != Qt::RightButton) {
+-			return;
+-		}
+-		_contextMenu = base::make_unique_q<Ui::PopupMenu>(
+-			this,
+-			st::popupMenuExpandedSeparator);
+-		Window::FillDialogsEntryMenu(
+-			_controller,
+-			Dialogs::EntryState{
+-				.key = folder(),
+-				.section = Dialogs::EntryState::Section::ContextMenu,
+-			},
+-			Ui::Menu::CreateAddActionCallback(_contextMenu));
+-		_contextMenu->popup(QCursor::pos());
+-	}, button->lifetime());
+-
+-	const auto now = folder();
+-	auto folderValue = now
+-		? (rpl::single(now) | rpl::type_erased)
+-		: controller->session().data().chatsListChanges(
+-		) | rpl::filter([](Data::Folder *folder) {
+-			return folder && (folder->id() == Data::Folder::kId);
+-		}) | rpl::take(1);
+-
+-	using namespace Settings;
+-	Badge::AddUnread(button, rpl::single(rpl::empty) | rpl::then(std::move(
+-		folderValue
+-	) | rpl::map([=](not_null<Data::Folder*> folder) {
+-		return folder->owner().chatsList(folder)->unreadStateChanges();
+-	}) | rpl::flatten_latest() | rpl::to_empty) | rpl::map([=] {
+-		const auto loaded = folder();
+-		const auto state = loaded
+-			? loaded->chatListBadgesState()
+-			: Dialogs::BadgesState();
+-		return Badge::UnreadBadge{ state.unreadCounter, true };
+-	}));
+-
+-	rpl::merge(
+-		controller->session().data().chatsListChanges(
+-		) | rpl::filter([](Data::Folder *folder) {
+-			return folder && (folder->id() == Data::Folder::kId);
+-		}) | rpl::to_empty,
+-		controller->session().data().stories().sourcesChanged(
+-			Data::StorySourcesList::Hidden
+-		)
+-	) | rpl::on_next([=] {
+-		const auto isArchiveVisible = checkArchive();
+-		wrap->toggle(isArchiveVisible, anim::type::normal);
+-		if (!isArchiveVisible) {
+-			_contextMenu = nullptr;
+-		}
+-		update();
+-	}, lifetime());
++  using namespace Settings;
++
++  const auto controller = _controller;
++  const auto folder = [=] {
++    return controller->session().data().folderLoaded(Data::Folder::kId);
++  };
++  const auto showArchive = [=](Qt::KeyboardModifiers modifiers) {
++    if (const auto f = folder()) {
++      if (modifiers & Qt::ControlModifier) {
++        controller->showInNewWindow(Window::SeparateId(
++            Window::SeparateType::Archive, &controller->session()));
++      } else {
++        controller->openFolder(f);
++      }
++      controller->window().hideSettingsAndLayer();
++      controller->removeLayerBlackout();
++    }
++  };
++  const auto checkArchive = [=] {
++    const auto f = folder();
++    return f && (!f->chatsList()->empty() || f->storiesCount() > 0) &&
++           controller->session().settings().archiveInMainMenu();
++  };
++
++  const auto wrap = _menu->add(object_ptr<Ui::SlideWrap<Ui::VerticalLayout>>(
++      _menu, object_ptr<Ui::VerticalLayout>(_menu)));
++  const auto inner = wrap->entity();
++  wrap->toggle(checkArchive(), anim::type::instant);
++
++  const auto button =
++      AddButtonWithIcon(inner, tr::lng_archived_name(), st::mainMenuButton,
++                        {&st::menuIconArchiveOpen});
++  inner->add(object_ptr<Ui::PlainShadow>(inner),
++             {0, st::mainMenuSkip, 0, st::mainMenuSkip});
++  button->setAcceptBoth(true);
++  button->clicks() |
++      rpl::on_next(
++          [=](Qt::MouseButton which) {
++            if (which == Qt::LeftButton) {
++              showArchive(button->clickModifiers());
++              return;
++            } else if (which != Qt::RightButton) {
++              return;
++            }
++            _contextMenu = base::make_unique_q<Ui::PopupMenu>(
++                this, st::popupMenuExpandedSeparator);
++            Window::FillDialogsEntryMenu(
++                _controller,
++                Dialogs::EntryState{
++                    .key = folder(),
++                    .section = Dialogs::EntryState::Section::ContextMenu,
++                },
++                Ui::Menu::CreateAddActionCallback(_contextMenu));
++            _contextMenu->popup(QCursor::pos());
++          },
++          button->lifetime());
++
++  const auto now = folder();
++  auto folderValue =
++      now ? (rpl::single(now) | rpl::type_erased)
++          : controller->session().data().chatsListChanges() |
++                rpl::filter([](Data::Folder *folder) {
++                  return folder && (folder->id() == Data::Folder::kId);
++                }) |
++                rpl::take(1);
++
++  using namespace Settings;
++  Badge::AddUnread(
++      button,
++      rpl::single(rpl::empty) |
++          rpl::then(
++              std::move(folderValue) |
++              rpl::map([=](not_null<Data::Folder *> folder) {
++                return folder->owner().chatsList(folder)->unreadStateChanges();
++              }) |
++              rpl::flatten_latest() | rpl::to_empty) |
++          rpl::map([=] {
++            const auto loaded = folder();
++            const auto state =
++                loaded ? loaded->chatListBadgesState() : Dialogs::BadgesState();
++            return Badge::UnreadBadge{state.unreadCounter, true};
++          }));
++
++  rpl::merge(controller->session().data().chatsListChanges() |
++                 rpl::filter([](Data::Folder *folder) {
++                   return folder && (folder->id() == Data::Folder::kId);
++                 }) |
++                 rpl::to_empty,
++             controller->session().data().stories().sourcesChanged(
++                 Data::StorySourcesList::Hidden)) |
++      rpl::on_next(
++          [=] {
++            const auto isArchiveVisible = checkArchive();
++            wrap->toggle(isArchiveVisible, anim::type::normal);
++            if (!isArchiveVisible) {
++              _contextMenu = nullptr;
++            }
++            update();
++          },
++          lifetime());
+ }
+ 
+ void MainMenu::setupUserpicButton() {
+-	_userpicButton->setClickedCallback([=] { toggleAccounts(); });
+-	_userpicButton->show();
++  _userpicButton->setClickedCallback([=] { toggleAccounts(); });
++  _userpicButton->show();
+ }
+ 
+ void MainMenu::toggleAccounts() {
+-	auto &settings = Core::App().settings();
+-	const auto shown = !settings.mainMenuAccountsShown();
+-	settings.setMainMenuAccountsShown(shown);
+-	Core::App().saveSettingsDelayed();
++  auto &settings = Core::App().settings();
++  const auto shown = !settings.mainMenuAccountsShown();
++  settings.setMainMenuAccountsShown(shown);
++  Core::App().saveSettingsDelayed();
+ }
+ 
+ void MainMenu::setupAccounts() {
+-	const auto inner = _accounts->entity();
++  const auto inner = _accounts->entity();
+ 
+-	inner->add(object_ptr<Ui::FixedHeightWidget>(inner, st::mainMenuSkip));
+-	auto events = Settings::SetupAccounts(inner, _controller);
+-	inner->add(object_ptr<Ui::FixedHeightWidget>(inner, st::mainMenuSkip));
++  inner->add(object_ptr<Ui::FixedHeightWidget>(inner, st::mainMenuSkip));
++  auto events = Settings::SetupAccounts(inner, _controller);
++  inner->add(object_ptr<Ui::FixedHeightWidget>(inner, st::mainMenuSkip));
+ 
+-	std::move(
+-		events.closeRequests
+-	) | rpl::on_next([=] {
+-		closeLayer();
+-	}, inner->lifetime());
++  std::move(events.closeRequests) |
++      rpl::on_next([=] { closeLayer(); }, inner->lifetime());
+ 
+-	_accounts->toggleOn(Core::App().settings().mainMenuAccountsShownValue());
+-	_accounts->finishAnimating();
++  _accounts->toggleOn(Core::App().settings().mainMenuAccountsShownValue());
++  _accounts->finishAnimating();
+ 
+-	_shadow->setDuration(0)->toggleOn(_accounts->shownValue());
++  _shadow->setDuration(0)->toggleOn(_accounts->shownValue());
+ }
+ 
+ void MainMenu::setupAccountsToggle() {
+-	_toggleAccounts->show();
+-	_toggleAccounts->setAcceptBoth();
+-	_toggleAccounts->addClickHandler([=](Qt::MouseButton button) {
+-		if (button == Qt::LeftButton) {
+-			toggleAccounts();
+-		}
+-	});
++  _toggleAccounts->show();
++  _toggleAccounts->setAcceptBoth();
++  _toggleAccounts->addClickHandler([=](Qt::MouseButton button) {
++    if (button == Qt::LeftButton) {
++      toggleAccounts();
++    }
++  });
+ }
+ 
+ void MainMenu::setupSetEmojiStatus() {
+-	_setEmojiStatus->overrideLinkClickHandler([=] {
+-		chooseEmojiStatus();
+-	});
++  _setEmojiStatus->overrideLinkClickHandler([=] { chooseEmojiStatus(); });
+ }
+ 
+ void MainMenu::parentResized() {
+-	resize(st::mainMenuWidth, parentWidget()->height());
++  resize(st::mainMenuWidth, parentWidget()->height());
+ }
+ 
+ void MainMenu::showFinished() {
+-	_showFinished = true;
+-
+-	_controller->checkHighlightControl(
+-		u"main-menu/emoji-status"_q,
+-		_setEmojiStatus,
+-		Settings::SubsectionTitleHighlight());
+-	_controller->checkHighlightControl(
+-		u"main-menu/night-mode"_q,
+-		_nightThemeToggle);
++  _showFinished = true;
++
++  _controller->checkHighlightControl(u"main-menu/emoji-status"_q,
++                                     _setEmojiStatus,
++                                     Settings::SubsectionTitleHighlight());
++  _controller->checkHighlightControl(u"main-menu/night-mode"_q,
++                                     _nightThemeToggle);
+ }
+ 
+ void MainMenu::setupMenu() {
+-	using namespace Settings;
+-
+-	const auto controller = _controller;
+-	const auto addAction = [&](
+-			rpl::producer<QString> text,
+-			IconDescriptor &&descriptor) {
+-		return AddButtonWithIcon(
+-			_menu,
+-			std::move(text),
+-			st::mainMenuButton,
+-			std::move(descriptor));
+-	};
+-	if (!_controller->session().supportMode()) {
+-		_menu->add(
+-			CreateButtonWithIcon(
+-				_menu,
+-				tr::lng_menu_my_profile(),
+-				st::mainMenuButton,
+-				{ &st::menuIconProfile })
+-		)->setClickedCallback([=] {
+-			controller->showSection(
+-				Info::Stories::MakeMyProfile(controller->session().user()));
+-		});
+-
+-		SetupMenuBots(_menu, controller);
+-
+-		_menu->add(
+-			object_ptr<Ui::PlainShadow>(_menu),
+-			{ 0, st::mainMenuSkip, 0, st::mainMenuSkip });
+-
+-		AddMyChannelsBox(addAction(
+-			tr::lng_create_group_title(),
+-			{ &st::menuIconGroups }
+-		), controller, true)->addClickHandler([=](Qt::MouseButton which) {
+-			if (which == Qt::LeftButton) {
+-				controller->showNewGroup();
+-			}
+-		});
+-
+-		AddMyChannelsBox(addAction(
+-			tr::lng_create_channel_title(),
+-			{ &st::menuIconChannel }
+-		), controller, false)->addClickHandler([=](Qt::MouseButton which) {
+-			if (which == Qt::LeftButton) {
+-				controller->showNewChannel();
+-			}
+-		});
+-
+-		addAction(
+-			tr::lng_menu_contacts(),
+-			{ &st::menuIconUserShow }
+-		)->setClickedCallback([=] {
+-			controller->show(PrepareContactsBox(controller));
+-		});
+-		addAction(
+-			tr::lng_menu_calls(),
+-			{ &st::menuIconPhone }
+-		)->setClickedCallback([=] {
+-			::Calls::ShowCallsBox(controller);
+-		});
+-		addAction(
+-			tr::lng_saved_messages(),
+-			{ &st::menuIconSavedMessages }
+-		)->setClickedCallback([=] {
+-			controller->showPeerHistory(controller->session().user());
+-		});
+-		const auto session = &controller->session();
+-		const auto wallet = _menu->add(
+-			object_ptr<Ui::SlideWrap<Ui::SettingsButton>>(
+-				_menu,
+-				CreateButtonWithIcon(
+-					_menu,
+-					tr::lng_wallet_menu(),
+-					st::mainMenuButton,
+-					{ &st::walletMenuIcon })));
+-		Ui::NewBadge::AddAfterButtonText(
+-			wallet->entity(),
+-			tr::lng_wallet_menu(),
+-			st::mainMenuButton);
+-		wallet->toggleOn(session->appConfig().value(
+-		) | rpl::map([=] {
+-			return session->appConfig().walletAvailable();
+-		}) | rpl::distinct_until_changed());
+-		wallet->finishAnimating();
+-		wallet->entity()->setClickedCallback([=] {
+-			controller->window().hideSettingsAndLayer();
+-			Wallet::ShowWallet(session);
+-		});
+-	} else {
+-		addAction(
+-			tr::lng_profile_add_contact(),
+-			{ &st::menuIconProfile }
+-		)->setClickedCallback([=] {
+-			controller->showAddContact();
+-		});
+-		addAction(
+-			rpl::single(u"Fix chats order"_q),
+-			{ &st::menuIconPin }
+-		)->toggleOn(rpl::single(
+-			_controller->session().settings().supportFixChatsOrder()
+-		))->toggledChanges(
+-		) | rpl::on_next([=](bool fix) {
+-			_controller->session().settings().setSupportFixChatsOrder(fix);
+-			_controller->session().saveSettings();
+-		}, _menu->lifetime());
+-		addAction(
+-			rpl::single(u"Reload templates"_q),
+-			{ &st::menuIconRestore }
+-		)->setClickedCallback([=] {
+-			_controller->session().supportTemplates().reload();
+-		});
+-	}
+-	addAction(
+-		tr::lng_menu_settings(),
+-		{ &st::menuIconSettings }
+-	)->setClickedCallback([=] {
+-		controller->showSettings();
+-	});
+-
+-	_nightThemeToggle = addAction(
+-		tr::lng_menu_night_mode(),
+-		{ &st::menuIconNightMode }
+-	)->toggleOn(_nightThemeSwitches.events_starting_with(
+-		Window::Theme::IsNightMode()
+-	));
+-	_nightThemeToggle->toggledChanges(
+-	) | rpl::filter([=](bool night) {
+-		return (night != Window::Theme::IsNightMode());
+-	}) | rpl::on_next([=](bool night) {
+-		if (Window::Theme::Background()->editingTheme()) {
+-			_nightThemeSwitches.fire(!night);
+-			controller->show(Ui::MakeInformBox(
+-				tr::lng_theme_editor_cant_change_theme()));
+-			return;
+-		}
+-		const auto weak = base::make_weak(this);
+-		const auto toggle = [=] {
+-			if (!weak) {
+-				Window::Theme::ToggleNightMode();
+-				Window::Theme::KeepApplied();
+-			} else {
+-				_nightThemeSwitch.callOnce(st::mainMenu.itemToggle.duration);
+-			}
+-		};
+-		Window::Theme::ToggleNightModeWithConfirmation(
+-			&_controller->window(),
+-			toggle);
+-	}, _nightThemeToggle->lifetime());
+-
+-	Core::App().settings().systemDarkModeValue(
+-	) | rpl::on_next([=](std::optional<bool> darkMode) {
+-		const auto darkModeEnabled
+-			= Core::App().settings().systemDarkModeEnabled();
+-		if (darkModeEnabled && darkMode.has_value()) {
+-			_nightThemeSwitches.fire_copy(*darkMode);
+-		}
+-	}, _nightThemeToggle->lifetime());
++  using namespace Settings;
++
++  const auto controller = _controller;
++  const auto addAction = [&](rpl::producer<QString> text,
++                             IconDescriptor &&descriptor) {
++    return AddButtonWithIcon(_menu, std::move(text), st::mainMenuButton,
++                             std::move(descriptor));
++  };
++  if (!_controller->session().supportMode()) {
++    if (!Chatcraft::IsUiHidden(u"main_menu.my_profile"_q, u"main_menu"_q)) {
++      _menu
++          ->add(CreateButtonWithIcon(_menu, tr::lng_menu_my_profile(),
++                                     st::mainMenuButton,
++                                     {&st::menuIconProfile}))
++          ->setClickedCallback([=] {
++            controller->showSection(
++                Info::Stories::MakeMyProfile(controller->session().user()));
++          });
++    }
++
++    if (!Chatcraft::IsUiHidden(u"main_menu.bots"_q, u"main_menu"_q)) {
++      SetupMenuBots(_menu, controller);
++    }
++
++    _menu->add(object_ptr<Ui::PlainShadow>(_menu),
++               {0, st::mainMenuSkip, 0, st::mainMenuSkip});
++
++    if (!Chatcraft::IsUiHidden(u"main_menu.new_group"_q, u"main_menu"_q)) {
++      AddMyChannelsBox(
++          addAction(tr::lng_create_group_title(), {&st::menuIconGroups}),
++          controller, true)
++          ->addClickHandler([=](Qt::MouseButton which) {
++            if (which == Qt::LeftButton) {
++              controller->showNewGroup();
++            }
++          });
++    }
++
++    if (!Chatcraft::IsUiHidden(u"main_menu.new_channel"_q, u"main_menu"_q)) {
++      AddMyChannelsBox(
++          addAction(tr::lng_create_channel_title(), {&st::menuIconChannel}),
++          controller, false)
++          ->addClickHandler([=](Qt::MouseButton which) {
++            if (which == Qt::LeftButton) {
++              controller->showNewChannel();
++            }
++          });
++    }
++
++    if (!Chatcraft::IsUiHidden(u"main_menu.contacts"_q, u"main_menu"_q)) {
++      addAction(tr::lng_menu_contacts(), {&st::menuIconUserShow})
++          ->setClickedCallback(
++              [=] { controller->show(PrepareContactsBox(controller)); });
++    }
++    if (!Chatcraft::IsUiHidden(u"main_menu.calls"_q, u"main_menu"_q)) {
++      addAction(tr::lng_menu_calls(), {&st::menuIconPhone})
++          ->setClickedCallback([=] { ::Calls::ShowCallsBox(controller); });
++    }
++    if (!Chatcraft::IsUiHidden(u"main_menu.saved_messages"_q, u"main_menu"_q)) {
++      addAction(tr::lng_saved_messages(), {&st::menuIconSavedMessages})
++          ->setClickedCallback([=] {
++            controller->showPeerHistory(controller->session().user());
++          });
++    }
++    const auto session = &controller->session();
++    if (!Chatcraft::IsUiHidden(u"main_menu.wallet"_q, u"main_menu"_q)) {
++      const auto wallet =
++          _menu->add(object_ptr<Ui::SlideWrap<Ui::SettingsButton>>(
++              _menu,
++              CreateButtonWithIcon(_menu, tr::lng_wallet_menu(),
++                                   st::mainMenuButton, {&st::walletMenuIcon})));
++      Ui::NewBadge::AddAfterButtonText(wallet->entity(), tr::lng_wallet_menu(),
++                                       st::mainMenuButton);
++      wallet->toggleOn(session->appConfig().value() | rpl::map([=] {
++                         return session->appConfig().walletAvailable();
++                       }) |
++                       rpl::distinct_until_changed());
++      wallet->finishAnimating();
++      wallet->entity()->setClickedCallback([=] {
++        controller->window().hideSettingsAndLayer();
++        Wallet::ShowWallet(session);
++      });
++    }
++  } else {
++    addAction(tr::lng_profile_add_contact(), {&st::menuIconProfile})
++        ->setClickedCallback([=] { controller->showAddContact(); });
++    addAction(rpl::single(u"Fix chats order"_q), {&st::menuIconPin})
++            ->toggleOn(rpl::single(
++                _controller->session().settings().supportFixChatsOrder()))
++            ->toggledChanges() |
++        rpl::on_next(
++            [=](bool fix) {
++              _controller->session().settings().setSupportFixChatsOrder(fix);
++              _controller->session().saveSettings();
++            },
++            _menu->lifetime());
++    addAction(rpl::single(u"Reload templates"_q), {&st::menuIconRestore})
++        ->setClickedCallback(
++            [=] { _controller->session().supportTemplates().reload(); });
++  }
++  if (!controller->session().supportMode() &&
++      controller->session().premiumPossible()) {
++    if (!Chatcraft::IsUiHidden(u"main_menu.premium"_q, u"main_menu"_q)) {
++      addAction(tr::lng_premium_summary_title(), {&st::menuIconGiftPremium})
++          ->setClickedCallback([=] {
++            controller->setPremiumRef("main_menu");
++            controller->showSettings(Settings::PremiumId());
++          });
++    }
++    if (!Chatcraft::IsUiHidden(u"main_menu.my_stars"_q, u"main_menu"_q)) {
++      addAction(tr::lng_settings_credits(), {&st::menuIconManage})
++          ->setClickedCallback(
++              [=] { controller->showSettings(Settings::CreditsId()); });
++    }
++  }
++  addAction(rpl::single(u"Lua 脚本管理"_q), {&st::menuIconManage})
++      ->setClickedCallback([=] { ShowScripts(controller); });
++  if (!Chatcraft::IsUiHidden(u"main_menu.settings"_q, u"main_menu"_q)) {
++    addAction(tr::lng_menu_settings(), {&st::menuIconSettings})
++        ->setClickedCallback([=] { controller->showSettings(); });
++  }
++
++  _nightThemeToggle =
++      addAction(tr::lng_menu_night_mode(), {&st::menuIconNightMode})
++          ->toggleOn(_nightThemeSwitches.events_starting_with(
++              Window::Theme::IsNightMode()));
++  _nightThemeToggle->toggledChanges() | rpl::filter([=](bool night) {
++    return (night != Window::Theme::IsNightMode());
++  }) |
++      rpl::on_next(
++          [=](bool night) {
++            if (Window::Theme::Background()->editingTheme()) {
++              _nightThemeSwitches.fire(!night);
++              controller->show(
++                  Ui::MakeInformBox(tr::lng_theme_editor_cant_change_theme()));
++              return;
++            }
++            const auto weak = base::make_weak(this);
++            const auto toggle = [=] {
++              if (!weak) {
++                Window::Theme::ToggleNightMode();
++                Window::Theme::KeepApplied();
++              } else {
++                _nightThemeSwitch.callOnce(st::mainMenu.itemToggle.duration);
++              }
++            };
++            Window::Theme::ToggleNightModeWithConfirmation(
++                &_controller->window(), toggle);
++          },
++          _nightThemeToggle->lifetime());
++
++  Core::App().settings().systemDarkModeValue() |
++      rpl::on_next(
++          [=](std::optional<bool> darkMode) {
++            const auto darkModeEnabled =
++                Core::App().settings().systemDarkModeEnabled();
++            if (darkModeEnabled && darkMode.has_value()) {
++              _nightThemeSwitches.fire_copy(*darkMode);
++            }
++          },
++          _nightThemeToggle->lifetime());
+ }
+ 
+ void MainMenu::resizeEvent(QResizeEvent *e) {
+-	_inner->resizeToWidth(width());
+-	updateControlsGeometry();
++  _inner->resizeToWidth(width());
++  updateControlsGeometry();
+ }
+ 
+ void MainMenu::updateControlsGeometry() {
+-	_userpicButton->moveToLeft(
+-		st::mainMenuUserpicLeft,
+-		st::mainMenuUserpicTop);
+-	if (_resetScaleButton) {
+-		_resetScaleButton->moveToRight(0, 0);
+-	}
+-	_setEmojiStatus->moveToLeft(
+-		st::mainMenuCoverStatusLeft,
+-		st::mainMenuCoverStatusTop,
+-		width());
+-	_toggleAccounts->setGeometry(
+-		0,
+-		st::mainMenuCoverNameTop,
+-		width(),
+-		st::mainMenuCoverHeight - st::mainMenuCoverNameTop);
+-	// Allow cover shadow over the scrolled content.
+-	const auto top = st::mainMenuCoverHeight - st::lineWidth;
+-	_scroll->setGeometry(0, top, width(), height() - top);
+-	updateInnerControlsGeometry();
++  _userpicButton->moveToLeft(st::mainMenuUserpicLeft, st::mainMenuUserpicTop);
++  if (_resetScaleButton) {
++    _resetScaleButton->moveToRight(0, 0);
++  }
++  _setEmojiStatus->moveToLeft(st::mainMenuCoverStatusLeft,
++                              st::mainMenuCoverStatusTop, width());
++  _toggleAccounts->setGeometry(0, st::mainMenuCoverNameTop, width(),
++                               st::mainMenuCoverHeight -
++                                   st::mainMenuCoverNameTop);
++  // Allow cover shadow over the scrolled content.
++  const auto top = st::mainMenuCoverHeight - st::lineWidth;
++  _scroll->setGeometry(0, top, width(), height() - top);
++  updateInnerControlsGeometry();
+ }
+ 
+ void MainMenu::updateInnerControlsGeometry() {
+-	const auto contentHeight = _accounts->height()
+-		+ _shadow->height()
+-		+ st::mainMenuSkip
+-		+ _menu->height();
+-	const auto available = height() - st::mainMenuCoverHeight - contentHeight;
+-	const auto footerHeight = std::max(
+-		available,
+-		st::mainMenuFooterHeightMin);
+-	if (_footer->height() != footerHeight) {
+-		_footer->resize(_footer->width(), footerHeight);
+-	}
++  const auto contentHeight = _accounts->height() + _shadow->height() +
++                             st::mainMenuSkip + _menu->height();
++  const auto available = height() - st::mainMenuCoverHeight - contentHeight;
++  const auto footerHeight = std::max(available, st::mainMenuFooterHeightMin);
++  if (_footer->height() != footerHeight) {
++    _footer->resize(_footer->width(), footerHeight);
++  }
+ }
+ 
+ void MainMenu::chooseEmojiStatus() {
+-	if (_controller->showFrozenError()) {
+-		return;
+-	} else if (const auto widget = _badge->widget()) {
+-		setupEmojiStatusDismiss();
+-		_emojiStatusPanel->show(_controller, widget, _badge->sizeTag());
+-	} else {
+-		ShowPremiumPreviewBox(_controller, PremiumFeature::EmojiStatus);
+-	}
++  if (_controller->showFrozenError()) {
++    return;
++  } else if (const auto widget = _badge->widget()) {
++    setupEmojiStatusDismiss();
++    _emojiStatusPanel->show(_controller, widget, _badge->sizeTag());
++  } else {
++    ShowPremiumPreviewBox(_controller, PremiumFeature::EmojiStatus);
++  }
+ }
+ 
+ void MainMenu::setupEmojiStatusDismiss() {
+-	if (_emojiStatusDismissSetup) {
+-		return;
+-	}
+-	_emojiStatusDismissSetup = true;
+-
+-	base::install_event_filter(this, parentWidget(), [=](
+-			not_null<QEvent*> e) {
+-		if (e->type() != QEvent::MouseButtonPress
+-			|| !_emojiStatusPanel->shown()) {
+-			return base::EventFilterResult::Continue;
+-		}
+-		_emojiStatusPanel->hideAnimated();
+-		return base::EventFilterResult::Cancel;
+-	});
++  if (_emojiStatusDismissSetup) {
++    return;
++  }
++  _emojiStatusDismissSetup = true;
++
++  base::install_event_filter(this, parentWidget(), [=](not_null<QEvent *> e) {
++    if (e->type() != QEvent::MouseButtonPress || !_emojiStatusPanel->shown()) {
++      return base::EventFilterResult::Continue;
++    }
++    _emojiStatusPanel->hideAnimated();
++    return base::EventFilterResult::Cancel;
++  });
+ }
+ 
+ bool MainMenu::eventHook(QEvent *event) {
+-	const auto type = event->type();
+-	if (type == QEvent::TouchBegin
+-		|| type == QEvent::TouchUpdate
+-		|| type == QEvent::TouchEnd
+-		|| type == QEvent::TouchCancel) {
+-		QGuiApplication::sendEvent(_inner, event);
+-	}
+-	return RpWidget::eventHook(event);
++  const auto type = event->type();
++  if (type == QEvent::TouchBegin || type == QEvent::TouchUpdate ||
++      type == QEvent::TouchEnd || type == QEvent::TouchCancel) {
++    QGuiApplication::sendEvent(_inner, event);
++  }
++  return RpWidget::eventHook(event);
+ }
+ 
+-void MainMenu::hideEvent(QHideEvent *e) {
+-	_emojiStatusPanel->hideFast();
+-}
++void MainMenu::hideEvent(QHideEvent *e) { _emojiStatusPanel->hideFast(); }
+ 
+ void MainMenu::paintEvent(QPaintEvent *e) {
+-	auto p = Painter(this);
+-	const auto clip = e->rect();
+-	const auto cover = QRect(0, 0, width(), st::mainMenuCoverHeight);
+-
+-	p.fillRect(clip, st::mainMenuBg);
+-	if (cover.intersects(clip)) {
+-		drawName(p);
+-	}
++  auto p = Painter(this);
++  const auto clip = e->rect();
++  const auto cover = QRect(0, 0, width(), st::mainMenuCoverHeight);
++
++  p.fillRect(clip, st::mainMenuBg);
++  if (cover.intersects(clip)) {
++    drawName(p);
++  }
+ }
+ 
+ void MainMenu::drawName(Painter &p) {
+-	const auto widthText = width()
+-		- st::mainMenuCoverNameLeft
+-		- _toggleAccounts->rightSkip();
+-
+-	const auto user = _controller->session().user();
+-	if (_nameVersion < user->nameVersion()) {
+-		_nameVersion = user->nameVersion();
+-		_name.setText(
+-			st::semiboldTextStyle,
+-			user->name(),
+-			Ui::NameTextOptions());
+-		moveBadge();
+-	}
+-	p.setFont(st::semiboldFont);
+-	p.setPen(st::windowBoldFg);
+-	_name.drawLeftElided(
+-		p,
+-		st::mainMenuCoverNameLeft,
+-		st::mainMenuCoverNameTop,
+-		(widthText
+-			- (_badge->widget()
+-				? (st::semiboldFont->spacew + _badge->widget()->width())
+-				: 0)),
+-		width());
++  const auto widthText =
++      width() - st::mainMenuCoverNameLeft - _toggleAccounts->rightSkip();
++
++  const auto user = _controller->session().user();
++  if (_nameVersion < user->nameVersion()) {
++    _nameVersion = user->nameVersion();
++    _name.setText(st::semiboldTextStyle, user->name(), Ui::NameTextOptions());
++    moveBadge();
++  }
++  p.setFont(st::semiboldFont);
++  p.setPen(st::windowBoldFg);
++  _name.drawLeftElided(
++      p, st::mainMenuCoverNameLeft, st::mainMenuCoverNameTop,
++      (widthText - (_badge->widget()
++                        ? (st::semiboldFont->spacew + _badge->widget()->width())
++                        : 0)),
++      width());
+ }
+ 
+ void MainMenu::initResetScaleButton() {
+-	_controller->widget()->screenValue(
+-	) | rpl::map([](not_null<QScreen*> screen) {
+-		return rpl::single(
+-			screen->availableGeometry()
+-		) | rpl::then(
+-			base::qt_signal_producer(
+-				screen.get(),
+-				&QScreen::availableGeometryChanged
+-			)
+-		);
+-	}) | rpl::flatten_latest(
+-	) | rpl::map([](QRect available) {
+-		return (available.width() >= st::windowMinWidth)
+-			&& (available.height() >= st::windowMinHeight);
+-	}) | rpl::distinct_until_changed(
+-	) | rpl::on_next([=](bool good) {
+-		if (good) {
+-			_resetScaleButton.destroy();
+-		} else {
+-			_resetScaleButton.create(this);
+-			_resetScaleButton->addClickHandler([] {
+-				cSetConfigScale(style::kScaleDefault);
+-				Local::writeSettings();
+-				Core::Restart();
+-			});
+-			_resetScaleButton->show();
+-			updateControlsGeometry();
+-		}
+-	}, lifetime());
++  _controller->widget()->screenValue() |
++      rpl::map([](not_null<QScreen *> screen) {
++        return rpl::single(screen->availableGeometry()) |
++               rpl::then(base::qt_signal_producer(
++                   screen.get(), &QScreen::availableGeometryChanged));
++      }) |
++      rpl::flatten_latest() | rpl::map([](QRect available) {
++        return (available.width() >= st::windowMinWidth) &&
++               (available.height() >= st::windowMinHeight);
++      }) |
++      rpl::distinct_until_changed() |
++      rpl::on_next(
++          [=](bool good) {
++            if (good) {
++              _resetScaleButton.destroy();
++            } else {
++              _resetScaleButton.create(this);
++              _resetScaleButton->addClickHandler([] {
++                cSetConfigScale(style::kScaleDefault);
++                Local::writeSettings();
++                Core::Restart();
++              });
++              _resetScaleButton->show();
++              updateControlsGeometry();
++            }
++          },
++          lifetime());
+ }
+ 
+-OthersUnreadState OtherAccountsUnreadStateCurrent(
+-		not_null<Main::Account*> current) {
+-	const auto &domain = Core::App().domain();
+-	auto counter = 0;
+-	auto allMuted = true;
+-	for (const auto &[index, account] : domain.accounts()) {
+-		if (account.get() == current) {
+-			continue;
+-		} else if (const auto session = account->maybeSession()) {
+-			counter += session->data().unreadWithMentionsBadge();
+-			if (!session->data().unreadWithMentionsBadgeMuted()) {
+-				allMuted = false;
+-			}
+-		}
+-	}
+-	return {
+-		.count = counter,
+-		.allMuted = allMuted,
+-	};
++OthersUnreadState
++OtherAccountsUnreadStateCurrent(not_null<Main::Account *> current) {
++  const auto &domain = Core::App().domain();
++  auto counter = 0;
++  auto allMuted = true;
++  for (const auto &[index, account] : domain.accounts()) {
++    if (account.get() == current) {
++      continue;
++    } else if (const auto session = account->maybeSession()) {
++      counter += session->data().unreadWithMentionsBadge();
++      if (!session->data().unreadWithMentionsBadgeMuted()) {
++        allMuted = false;
++      }
++    }
++  }
++  return {
++      .count = counter,
++      .allMuted = allMuted,
++  };
+ }
+ 
+-rpl::producer<OthersUnreadState> OtherAccountsUnreadState(
+-		not_null<Main::Account*> current) {
+-	return rpl::single(rpl::empty) | rpl::then(
+-		Core::App().unreadBadgeChanges()
+-	) | rpl::map([=] {
+-		return OtherAccountsUnreadStateCurrent(current);
+-	});
++rpl::producer<OthersUnreadState>
++OtherAccountsUnreadState(not_null<Main::Account *> current) {
++  return rpl::single(rpl::empty) | rpl::then(Core::App().unreadBadgeChanges()) |
++         rpl::map([=] { return OtherAccountsUnreadStateCurrent(current); });
+ }
+ 
+-base::EventFilterResult MainMenu::redirectToInnerChecked(not_null<QEvent*> e) {
+-	if (_insideEventRedirect) {
+-		return base::EventFilterResult::Continue;
+-	}
+-	const auto weak = base::make_weak(this);
+-	_insideEventRedirect = true;
+-	QGuiApplication::sendEvent(_inner, e);
+-	if (weak) {
+-		_insideEventRedirect = false;
+-	}
+-	return base::EventFilterResult::Cancel;
++base::EventFilterResult MainMenu::redirectToInnerChecked(not_null<QEvent *> e) {
++  if (_insideEventRedirect) {
++    return base::EventFilterResult::Continue;
++  }
++  const auto weak = base::make_weak(this);
++  _insideEventRedirect = true;
++  QGuiApplication::sendEvent(_inner, e);
++  if (weak) {
++    _insideEventRedirect = false;
++  }
++  return base::EventFilterResult::Cancel;
+ }
+ 
+ void MainMenu::setupSwipe() {
+-	const auto outer = _controller->widget()->body();
+-	base::install_event_filter(this, outer, [=](not_null<QEvent*> e) {
+-		const auto type = e->type();
+-		if (type == QEvent::TouchBegin
+-			|| type == QEvent::TouchUpdate
+-			|| type == QEvent::TouchEnd
+-			|| type == QEvent::TouchCancel) {
+-			return redirectToInnerChecked(e);
+-		} else if (type == QEvent::Wheel) {
+-			const auto w = static_cast<QWheelEvent*>(e.get());
+-			const auto d = Ui::ScrollDeltaF(w);
+-			if (std::abs(d.x()) > std::abs(d.y())) {
+-				return redirectToInnerChecked(e);
+-			}
+-		}
+-		return base::EventFilterResult::Continue;
+-	});
+-	const auto handles = outer->testAttribute(Qt::WA_AcceptTouchEvents);
+-	if (!handles) {
+-		outer->setAttribute(Qt::WA_AcceptTouchEvents);
+-		lifetime().add([=] {
+-			outer->setAttribute(Qt::WA_AcceptTouchEvents, false);
+-		});
+-	}
+-
+-	auto update = [=](Ui::Controls::SwipeContextData data) {
+-		if (data.translation < 0) {
+-			if (!_swipeBackData.callback) {
+-				_swipeBackData = Ui::Controls::SetupSwipeBack(
+-					this,
+-					[=]() -> std::pair<QColor, QColor> {
+-						return {
+-							st::historyForwardChooseBg->c,
+-							st::historyForwardChooseFg->c,
+-						};
+-					});
+-			}
+-			_swipeBackData.callback(data);
+-			return;
+-		} else if (_swipeBackData.lifetime) {
+-			_swipeBackData = {};
+-		}
+-	};
+-
+-	auto init = [=](Ui::Controls::SwipeHandlerInitData data) {
+-		if (data.direction != Qt::LeftToRight) {
+-			return Ui::Controls::SwipeHandlerFinishData();
+-		}
+-		if (_emojiStatusPanel && _emojiStatusPanel->hasFocus()) {
+-			return Ui::Controls::SwipeHandlerFinishData();
+-		}
+-		return Ui::Controls::DefaultSwipeBackHandlerFinishData([=] {
+-			closeLayer();
+-		});
+-	};
+-
+-	Ui::Controls::SetupSwipeHandler({
+-		.widget = _inner,
+-		.scroll = _scroll.data(),
+-		.update = std::move(update),
+-		.init = std::move(init),
+-	});
++  const auto outer = _controller->widget()->body();
++  base::install_event_filter(this, outer, [=](not_null<QEvent *> e) {
++    const auto type = e->type();
++    if (type == QEvent::TouchBegin || type == QEvent::TouchUpdate ||
++        type == QEvent::TouchEnd || type == QEvent::TouchCancel) {
++      return redirectToInnerChecked(e);
++    } else if (type == QEvent::Wheel) {
++      const auto w = static_cast<QWheelEvent *>(e.get());
++      const auto d = Ui::ScrollDeltaF(w);
++      if (std::abs(d.x()) > std::abs(d.y())) {
++        return redirectToInnerChecked(e);
++      }
++    }
++    return base::EventFilterResult::Continue;
++  });
++  const auto handles = outer->testAttribute(Qt::WA_AcceptTouchEvents);
++  if (!handles) {
++    outer->setAttribute(Qt::WA_AcceptTouchEvents);
++    lifetime().add(
++        [=] { outer->setAttribute(Qt::WA_AcceptTouchEvents, false); });
++  }
++
++  auto update = [=](Ui::Controls::SwipeContextData data) {
++    if (data.translation < 0) {
++      if (!_swipeBackData.callback) {
++        _swipeBackData = Ui::Controls::SetupSwipeBack(
++            this, [=]() -> std::pair<QColor, QColor> {
++              return {
++                  st::historyForwardChooseBg->c,
++                  st::historyForwardChooseFg->c,
++              };
++            });
++      }
++      _swipeBackData.callback(data);
++      return;
++    } else if (_swipeBackData.lifetime) {
++      _swipeBackData = {};
++    }
++  };
++
++  auto init = [=](Ui::Controls::SwipeHandlerInitData data) {
++    if (data.direction != Qt::LeftToRight) {
++      return Ui::Controls::SwipeHandlerFinishData();
++    }
++    if (_emojiStatusPanel && _emojiStatusPanel->hasFocus()) {
++      return Ui::Controls::SwipeHandlerFinishData();
++    }
++    return Ui::Controls::DefaultSwipeBackHandlerFinishData(
++        [=] { closeLayer(); });
++  };
++
++  Ui::Controls::SetupSwipeHandler({
++      .widget = _inner,
++      .scroll = _scroll.data(),
++      .update = std::move(update),
++      .init = std::move(init),
++  });
+ }
+ 
+ } // namespace Window

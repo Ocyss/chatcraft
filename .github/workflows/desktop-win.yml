@@ -32,6 +32,10 @@ jobs:
           git submodule update --init clients/desktop
           git -C clients/desktop submodule update --init --recursive
 
+      - name: Apply and verify Desktop UI integration.
+        # 子模块提交不包含本地未提交改动；从主仓库应用受版本控制的 UI overlay。
+        run: python scripts/prepare-desktop.py
+
       - name: Prepare directories.
         # 复刻官方布局：TBuild\Libraries 与客户端仓库互为兄弟目录
         run: |
@@ -162,6 +166,9 @@ jobs:
         # 保留 tdesktop_rust：清理白名单不含 .cpp，会误删 wallet_engine 生成代码
         run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' -o -path '*/tdesktop_rust/*' ')' -type f ')' -o -empty ')' -delete
 
+      - name: Verify Desktop UI integration before compiling.
+        run: python scripts/prepare-desktop.py --check
+
       - name: Telegram Desktop build.
         # 使用官方测试 api_id/hash，无需配置 secrets；仅供本地测试，不可分发
         run: |
@@ -183,6 +190,11 @@ jobs:
         run: |
           set OUT=%TBUILD%\desktop\out\Debug
           mkdir artifact
+          mkdir artifact\scripts
+          copy examples\lua\ui_filter.lua artifact\scripts\ui_filter.lua.example
+          echo Place .lua files here, then restart Telegram.>artifact\scripts\README.txt
+          echo Source commit: %GITHUB_SHA%>artifact\BUILD-INFO.txt
+          echo Desktop UI: script manager, folder opener, stable ID filtering>>artifact\BUILD-INFO.txt
           move %OUT%\Telegram.exe artifact/
           move %OUT%\Updater.exe artifact/
 

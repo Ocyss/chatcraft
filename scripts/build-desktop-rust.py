@@ -91,6 +91,8 @@ def main():
     for symbol in (
         "chatcraft_engine_new",
         "chatcraft_filter_message",
+        "chatcraft_scripts_status",
+        "chatcraft_filter_ui",
         "chatcraft_ads_disabled",
     ):
         if symbol not in symbols:

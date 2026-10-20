@@ -4,7 +4,22 @@
 
 `clients/desktop` pins a commit in `Ocyss/Telegram-Desktop`. The fork contains
 `Telegram/SourceFiles/chatcraft/chatcraft_filter.{h,cpp}` and the small native
-hooks directly. There is no build-time patch application.
+hooks directly. Pending script-manager and UI-filter integration is shipped as
+`scripts/desktop-ui.patch` in the root repository, so a clean CI checkout does
+not depend on uncommitted changes inside the submodule.
+
+Before configuring a local Desktop build, run:
+
+```text
+python scripts/prepare-desktop.py
+```
+
+This applies the overlay once, accepts an already-applied overlay, and stops
+on conflicts without overwriting local work. `--check` verifies it without
+changing sources. Windows CI runs this after checkout and again before the
+native build. If editing the overlay sources, update the tracked patch as well.
+Once these changes are published in the Desktop fork, advance the pinned
+submodule and remove the corresponding overlay together.
 
 - `History::createItem`: evaluates rules after message construction.
 - `HistoryItem`: caches the hidden state.
@@ -13,6 +28,19 @@ hooks directly. There is no build-time patch application.
 
 Other platforms retain the bridge stub until integrated. No generic hooking
 framework is needed for these explicit source-level calls.
+
+## CI scope and artifacts
+
+`desktop-win` builds Windows Rust FFI itself and links it into Telegram. It does
+not depend on the separate `ffi` workflow. That optional workflow includes
+Windows, Linux, macOS, Android and iOS compilation and now runs only through
+`workflow_dispatch`, while Desktop testing is the current priority. `core`
+continues running workspace tests and clean-checkout overlay regression tests.
+
+The Windows artifact includes `BUILD-INFO.txt` with the root source commit, a
+`scripts/` directory, and `ui_filter.lua.example`. Rename that example to
+`ui_filter.lua` to enable its filtering, then restart. The `.example` suffix
+prevents unexpectedly enabling filters by merely extracting a new build.
 
 ## Unified Rust library
 
@@ -55,6 +83,7 @@ Textual merge success is not evidence of behavioral compatibility.
 
 ## Configuration
 
+- `CHATCRAFT_SCRIPT_DIR`: override the default `scripts/` next to Telegram.exe.
 - `CHATCRAFT_LUA_SCRIPT`: Lua filter path.
 - `CHATCRAFT_CONFIG_FILE`: EngineConfig JSON file.
 - `CHATCRAFT_CONFIG`: inline EngineConfig JSON (highest precedence).

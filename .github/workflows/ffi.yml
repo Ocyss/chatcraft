@@ -1,11 +1,8 @@
-# FFI 库：桌面三端 + Android + iOS 仅编译验证
+# 可选的跨平台 FFI 编译验证；桌面 Windows 主流程自行构建并链接 Rust FFI。
 name: ffi
 
 on:
-  push:
-    branches: [main]
-    paths: ["crates/**", "Cargo.*"]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   desktop:
