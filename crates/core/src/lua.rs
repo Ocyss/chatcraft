@@ -1,6 +1,6 @@
 //! Lua 脚本扩展：脚本定义全局函数 `filter(msg)` 决定消息动作。
 //!
-//! 脚本示例见 `scripts/example.lua`。`msg` 字段与 [`Message`] 序列化结构一致。
+//! 脚本示例见 `examples/lua/example.lua`。`msg` 字段与 [`Message`] 序列化结构一致。
 //! 返回值可以是字符串 "allow" | "hide" | "collapse" | "highlight"，
 //! 或表 `{ action = "hide", reason = "..." }`。
 
@@ -53,15 +53,32 @@ impl LuaFilter {
         counter
     }
 
-    /// 调用脚本的 `filter(msg)`；脚本未定义或出错时返回 Ok(None)（视为 allow）。
+    /// Call `filter(msg)`; missing callbacks and runtime errors fail open.
     pub fn filter(&self, msg: &Message) -> mlua::Result<Option<(Action, Option<String>)>> {
+        self.call_filter("filter", msg)
+    }
+
+    /// Call `filter_ui(item)` with stable `id` and `kind` strings.
+    /// Return `"hide"` or `{ action = "hide", reason = "..." }` to hide.
+    pub fn filter_ui(
+        &self,
+        item: &crate::engine::UiItem,
+    ) -> mlua::Result<Option<(Action, Option<String>)>> {
+        self.call_filter("filter_ui", item)
+    }
+
+    fn call_filter(
+        &self,
+        name: &str,
+        item: &impl serde::Serialize,
+    ) -> mlua::Result<Option<(Action, Option<String>)>> {
         self.counter.set(0);
         let globals = self.lua.globals();
-        let f: Value = globals.get("filter")?;
+        let f: Value = globals.get(name)?;
         let Value::Function(f) = f else {
             return Ok(None);
         };
-        let arg = self.lua.to_value(msg)?;
+        let arg = self.lua.to_value(item)?;
         match f.call::<Value>(arg) {
             Ok(Value::String(s)) => Ok(parse_action(s.to_str()?.as_ref()).map(|a| (a, None))),
             Ok(Value::Table(t)) => {

@@ -4,7 +4,7 @@ name: core
 on:
   push:
     branches: [main]
-    paths: ["crates/**", "tests/**", "scripts/**", "Cargo.*"]
+    paths: ["crates/**", "tests/**", "examples/**", "scripts/**", "Cargo.*"]
   pull_request:
 
 jobs:

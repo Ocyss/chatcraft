@@ -17,6 +17,8 @@ pub struct EngineConfig {
     pub rules: RuleSet,
     /// Lua 脚本文件路径（可选）。
     pub lua_script: Option<std::path::PathBuf>,
+    /// Optional directory of scripts; direct `.lua` children load in path order.
+    pub script_dir: Option<std::path::PathBuf>,
 }
 
 /// 过滤结果。
@@ -38,9 +40,33 @@ impl FilterOutcome {
     }
 }
 
+/// Load status of a script (or an unreadable script directory).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptStatus {
+    pub path: std::path::PathBuf,
+    pub name: String,
+    pub loaded: bool,
+    pub error: Option<String>,
+}
+
+/// Platform-independent UI identity; IDs must not depend on localized labels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiItem {
+    pub id: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiFilterOutcome {
+    pub hide: bool,
+    pub source: String,
+    pub reason: Option<String>,
+}
+
 pub struct Engine {
     rules: RuleSet,
-    lua: Option<LuaFilter>,
+    lua: Vec<LuaFilter>,
+    scripts: Vec<ScriptStatus>,
 }
 
 impl Engine {
@@ -49,14 +75,89 @@ impl Engine {
         rules
             .compile()
             .map_err(|e| format!("rule compile error: {e}"))?;
-        let lua = match &config.lua_script {
+        let mut lua = Vec::new();
+        let mut scripts = Vec::new();
+        let legacy = match &config.lua_script {
             Some(path) => Some(
                 LuaFilter::from_file(path)
                     .map_err(|e| format!("lua load error ({}): {e}", path.display()))?,
             ),
             None => None,
         };
-        Ok(Self { rules, lua })
+        if let Some(filter) = legacy {
+            lua.push(filter);
+            scripts.push(script_status(
+                config.lua_script.as_ref().unwrap().clone(),
+                None,
+            ));
+        }
+        if let Some(dir) = config.script_dir {
+            match std::fs::read_dir(&dir) {
+                Ok(entries) => {
+                    let mut paths = Vec::new();
+                    for entry in entries {
+                        match entry {
+                            Ok(entry) => {
+                                let path = entry.path();
+                                if path.extension().is_some_and(|ext| ext == "lua")
+                                    && path.is_file()
+                                {
+                                    paths.push(path);
+                                }
+                            }
+                            Err(error) => {
+                                scripts.push(script_status(dir.clone(), Some(error.to_string())))
+                            }
+                        }
+                    }
+                    paths.sort();
+                    for path in paths {
+                        match LuaFilter::from_file(&path) {
+                            Ok(filter) => {
+                                lua.push(filter);
+                                scripts.push(script_status(path, None));
+                            }
+                            Err(error) => {
+                                scripts.push(script_status(path, Some(error.to_string())))
+                            }
+                        }
+                    }
+                }
+                Err(error) => scripts.push(script_status(dir, Some(error.to_string()))),
+            }
+        }
+        Ok(Self {
+            rules,
+            lua,
+            scripts,
+        })
+    }
+
+    /// Script load statuses, including failures that did not prevent startup.
+    pub fn scripts_status(&self) -> &[ScriptStatus] {
+        &self.scripts
+    }
+
+    /// Any script may hide an item; errors, absent callbacks and other actions allow it.
+    pub fn filter_ui(&self, item: &UiItem) -> UiFilterOutcome {
+        for lua in &self.lua {
+            match lua.filter_ui(item) {
+                Ok(Some((Action::Hide, reason))) => {
+                    return UiFilterOutcome {
+                        hide: true,
+                        source: "lua".into(),
+                        reason,
+                    };
+                }
+                Err(error) => eprintln!("chatcraft lua UI error: {error}"),
+                _ => {}
+            }
+        }
+        UiFilterOutcome {
+            hide: false,
+            source: "default".into(),
+            reason: None,
+        }
     }
 
     /// 对单条消息求值。优先级：官方广告 > 声明式规则 > Lua 脚本。
@@ -75,7 +176,7 @@ impl Engine {
                 reason: None,
             };
         }
-        if let Some(lua) = &self.lua {
+        for lua in &self.lua {
             match lua.filter(msg) {
                 Ok(Some((action, reason))) => {
                     return FilterOutcome {
@@ -89,6 +190,19 @@ impl Engine {
             }
         }
         FilterOutcome::allow()
+    }
+}
+
+fn script_status(path: std::path::PathBuf, error: Option<String>) -> ScriptStatus {
+    ScriptStatus {
+        name: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        loaded: error.is_none(),
+        path,
+        error,
     }
 }
 

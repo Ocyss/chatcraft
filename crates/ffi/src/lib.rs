@@ -6,7 +6,7 @@
 use std::ffi::{CStr, CString, c_char};
 use std::panic::AssertUnwindSafe;
 
-use chatcraft_core::{Engine, EngineConfig, Message};
+use chatcraft_core::{Engine, EngineConfig, Message, UiItem};
 
 fn read_str<'a>(ptr: *const c_char) -> Option<&'a str> {
     if ptr.is_null() {
@@ -69,6 +69,90 @@ pub unsafe extern "C" fn chatcraft_filter_message(
     match result {
         Ok(Some(json)) => into_c_string(json),
         _ => std::ptr::null_mut(),
+    }
+}
+
+/// Return script load statuses as a JSON array; free with `chatcraft_string_free`.
+/// Returns null for a null engine or serialization failure.
+///
+/// # Safety
+/// `engine` must be null or a live handle used on its creating thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chatcraft_scripts_status(engine: *const Engine) -> *mut c_char {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let engine = unsafe { engine.as_ref() }?;
+        serde_json::to_string(engine.scripts_status()).ok()
+    }));
+    match result {
+        Ok(Some(json)) => into_c_string(json),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// Filter `{ "id": "stable.id", "kind": "button" }`, returning
+/// `{ "hide": false, "source": "default", "reason": null }` JSON.
+/// Free the result with `chatcraft_string_free`; invalid input returns null.
+///
+/// # Safety
+/// `engine` must be null or a live handle used on its creating thread.
+/// `item_json` must be null or a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chatcraft_filter_ui(
+    engine: *const Engine,
+    item_json: *const c_char,
+) -> *mut c_char {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let engine = unsafe { engine.as_ref() }?;
+        let item: UiItem = serde_json::from_str(read_str(item_json)?).ok()?;
+        serde_json::to_string(&engine.filter_ui(&item)).ok()
+    }));
+    match result {
+        Ok(Some(json)) => into_c_string(json),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe fn take_json(ptr: *mut c_char) -> serde_json::Value {
+        assert!(!ptr.is_null());
+        let json = serde_json::from_str(unsafe { CStr::from_ptr(ptr) }.to_str().unwrap()).unwrap();
+        unsafe { chatcraft_string_free(ptr) };
+        json
+    }
+
+    #[test]
+    fn ui_and_status_json_roundtrip() {
+        let path = std::env::temp_dir().join(format!("chatcraft-ffi-{}.lua", std::process::id()));
+        std::fs::write(&path, "function filter_ui(item) if item.id == 'toolbar.ads' and item.kind == 'button' then return {action='hide', reason='ads'} end end").unwrap();
+        let config = CString::new(serde_json::json!({"lua_script": path}).to_string()).unwrap();
+        unsafe {
+            let engine = chatcraft_engine_new(config.as_ptr());
+            assert!(!engine.is_null());
+            let statuses = take_json(chatcraft_scripts_status(engine));
+            assert_eq!(statuses[0]["loaded"], true);
+            assert_eq!(statuses[0]["error"], serde_json::Value::Null);
+            let item = CString::new(r#"{"id":"toolbar.ads","kind":"button"}"#).unwrap();
+            let outcome = take_json(chatcraft_filter_ui(engine, item.as_ptr()));
+            assert_eq!(outcome["hide"], true);
+            assert_eq!(outcome["reason"], "ads");
+            let item = CString::new(r#"{"id":"toolbar.settings","kind":"button"}"#).unwrap();
+            assert_eq!(
+                take_json(chatcraft_filter_ui(engine, item.as_ptr()))["hide"],
+                false
+            );
+            for invalid in ["{", "{}", r#"{"id":1,"kind":"button"}"#] {
+                let input = CString::new(invalid).unwrap();
+                assert!(chatcraft_filter_ui(engine, input.as_ptr()).is_null());
+            }
+            assert!(chatcraft_filter_ui(engine, std::ptr::null()).is_null());
+            assert!(chatcraft_scripts_status(std::ptr::null()).is_null());
+            assert!(chatcraft_filter_ui(std::ptr::null(), item.as_ptr()).is_null());
+            chatcraft_engine_free(engine);
+        }
+        std::fs::remove_file(path).unwrap();
     }
 }
 

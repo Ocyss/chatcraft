@@ -5,7 +5,8 @@
 ```
 crates/core   # 纯 Rust 跨平台核心：规则引擎、Lua 脚本、广告开关
 crates/ffi    # C ABI (cdylib + staticlib)，供 Desktop/Android/iOS 调用
-scripts/      # 示例 Lua 脚本
+scripts/      # 开发与 CI 构建工具（Python 等）
+examples/lua/ # 客户端运行时 Lua 过滤示例，不自动加载
 tests/fixtures # 跨平台共享测试用例
 clients/      # 官方客户端 fork (git submodule)，原生接入直接提交到 fork
 ```
