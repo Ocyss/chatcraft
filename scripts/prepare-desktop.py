@@ -26,6 +26,10 @@ REQUIRED = {
     "Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp": (
         "chatcraft_filter_ui",
         "chatcraft_scripts_status",
+        "chatcraft_filter_chat",
+        "chatcraft_lifecycle",
+        "chatcraft_ui_requests",
+        "chatcraft_ui_respond",
         'absoluteFilePath(u"scripts"_q)',
     ),
     "Telegram/SourceFiles/settings/sections/settings_main.cpp": (
@@ -34,7 +38,18 @@ REQUIRED = {
         "settings.my_stars",
     ),
     "Telegram/SourceFiles/settings/settings_builder.cpp": ("Chatcraft::IsUiHidden",),
-    "Telegram/CMakeLists.txt": ("CHATCRAFT_ENABLED=1",),
+    "Telegram/CMakeLists.txt": (
+        "CHATCRAFT_ENABLED=1",
+        "TDESKTOP_DISABLE_AUTOUPDATE=1",
+    ),
+    "Telegram/SourceFiles/dialogs/dialogs_inner_widget.cpp": (
+        "Chatcraft::FilterChat",
+        "_chatcraftProjection",
+    ),
+    "Telegram/SourceFiles/dialogs/dialogs_inner_widget.h": ("_chatcraftProjection",),
+    "Telegram/SourceFiles/core/application.cpp": (
+        'Chatcraft::ShowLifecycleNotifications(u"startup"_q)',
+    ),
 }
 
 

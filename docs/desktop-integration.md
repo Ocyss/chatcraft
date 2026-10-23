@@ -37,10 +37,15 @@ Windows, Linux, macOS, Android and iOS compilation and now runs only through
 `workflow_dispatch`, while Desktop testing is the current priority. `core`
 continues running workspace tests and clean-checkout overlay regression tests.
 
-The Windows artifact includes `BUILD-INFO.txt` with the root source commit, a
-`scripts/` directory, and `ui_filter.lua.example`. Rename that example to
-`ui_filter.lua` to enable its filtering, then restart. The `.example` suffix
-prevents unexpectedly enabling filters by merely extracting a new build.
+The Windows artifact includes `BUILD-INFO.txt` with the root source commit.
+Only `scripts/welcome.lua` is enabled by default. `scripts/README.md` is copied
+from the root README; `scripts/types/chatcraft.lua` and `.luarc.json` provide
+LuaLS completion without executing the type declarations. API documentation is
+maintained in `docs/lua/chatcraft.lua`.
+
+The `examples/` directory contains `ad_filter.lua`, `ui_filter.lua` and
+`chat_list.lua` with their normal filenames. Copy a script into `scripts/` and
+restart to enable it; no extension change is needed.
 
 ## Unified Rust library
 
@@ -59,8 +64,9 @@ There is no separate Chatcraft static library or runtime DLL.
 
 The CI workflow performs this automatically. Upstream may temporarily build a
 DLL for wallet-engine binding generation; that is not a distributed dependency.
-The resulting artifact contains `Telegram.exe` and the separate upstream
-`Updater.exe`, not an installer. Debug remains the current C++ configuration;
+The resulting artifact contains `Telegram.exe`, not an installer. Official
+auto-update is disabled and `Updater.exe` is not distributed, to avoid replacing
+the custom client. Debug remains the current C++ configuration;
 this migration does not promise official-release binary size.
 
 ## Versioning

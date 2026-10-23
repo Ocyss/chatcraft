@@ -1,0 +1,5 @@
+{
+  "workspace.library": ["docs/lua"],
+  "runtime.version": "Lua 5.4",
+  "workspace.checkThirdParty": false
+}

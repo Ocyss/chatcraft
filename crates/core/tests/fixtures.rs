@@ -25,7 +25,7 @@ fn fixtures_match_expectations() {
 
     let engine = Engine::new(EngineConfig {
         rules: Default::default(),
-        lua_script: Some(root.join("examples/lua/example.lua")),
+        lua_script: Some(root.join("tests/fixtures/filter.lua")),
         ..Default::default()
     })
     .unwrap();

@@ -1,10 +1,40 @@
-//! Lua 脚本扩展：脚本定义全局函数 `filter(msg)` 决定消息动作。
+//! Lua extensions: prefer `chatcraft.filter_message`, `filter_ui`, `filter_chat_list`.
 //!
-//! 脚本示例见 `examples/lua/example.lua`。`msg` 字段与 [`Message`] 序列化结构一致。
+//! `msg` fields match the serialized [`Message`] structure.
 //! 返回值可以是字符串 "allow" | "hide" | "collapse" | "highlight"，
 //! 或表 `{ action = "hide", reason = "..." }`。
 
 use mlua::{Lua, LuaSerdeExt, Value};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+    rc::Rc,
+};
+
+pub const UI_REQUEST_LIMIT: usize = 128;
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UiRequest {
+    pub id: u64,
+    pub kind: &'static str,
+    pub title: String,
+    pub text: String,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct UiQueue {
+    next_id: u64,
+    requests: VecDeque<UiRequest>,
+    pending: usize,
+}
+
+impl UiQueue {
+    pub(crate) fn drain(&mut self) -> Vec<UiRequest> {
+        self.requests.drain(..).collect()
+    }
+}
+
+type Callbacks = Rc<RefCell<HashMap<u64, mlua::RegistryKey>>>;
 
 use crate::message::Message;
 use crate::rules::Action;
@@ -15,14 +45,103 @@ const INSTRUCTION_LIMIT: u32 = 1_000_000;
 pub struct LuaFilter {
     lua: Lua,
     counter: std::rc::Rc<std::cell::Cell<u32>>,
+    callbacks: Callbacks,
+    queue: Rc<RefCell<UiQueue>>,
 }
 
 impl LuaFilter {
     pub fn from_source(source: &str) -> mlua::Result<Self> {
+        Self::with_queue(source, Rc::new(RefCell::new(UiQueue::default())))
+    }
+
+    pub(crate) fn with_queue(source: &str, queue: Rc<RefCell<UiQueue>>) -> mlua::Result<Self> {
         let lua = Lua::new();
         let counter = Self::install_instruction_limit(&lua);
+        let callbacks: Callbacks = Rc::default();
+        let api = lua.create_table()?;
+        let utils = lua.create_table()?;
+        for kind in ["alert", "confirm"] {
+            let queue = queue.clone();
+            let callbacks = callbacks.clone();
+            utils.set(
+                kind,
+                lua.create_function(move |lua, args: mlua::MultiValue| {
+                    let expected = if kind == "confirm" { 3 } else { 2 };
+                    if args.len() != expected {
+                        return Err(mlua::Error::RuntimeError(
+                            "invalid UI utility arguments".into(),
+                        ));
+                    }
+                    let title = match &args[0] {
+                        Value::String(s) => s.to_str()?.to_string(),
+                        _ => {
+                            return Err(mlua::Error::RuntimeError("title must be a string".into()));
+                        }
+                    };
+                    let text = match &args[1] {
+                        Value::String(s) => s.to_str()?.to_string(),
+                        _ => return Err(mlua::Error::RuntimeError("text must be a string".into())),
+                    };
+                    let mut queue = queue.borrow_mut();
+                    let queued_alerts = queue.requests.iter().filter(|r| r.kind == "alert").count();
+                    if queued_alerts + queue.pending >= UI_REQUEST_LIMIT {
+                        return Err(mlua::Error::RuntimeError(
+                            "UI request limit exceeded".into(),
+                        ));
+                    }
+                    // Stay exactly representable in JavaScript/Qt JSON numbers.
+                    if queue.next_id >= 9_007_199_254_740_991 {
+                        return Err(mlua::Error::RuntimeError("UI request IDs exhausted".into()));
+                    }
+                    let id = queue.next_id + 1;
+                    if kind == "confirm" {
+                        let Value::Function(callback) = &args[2] else {
+                            return Err(mlua::Error::RuntimeError(
+                                "callback must be a function".into(),
+                            ));
+                        };
+                        callbacks
+                            .borrow_mut()
+                            .insert(id, lua.create_registry_value(callback.clone())?);
+                        queue.pending += 1;
+                    }
+                    queue.next_id = id;
+                    queue.requests.push_back(UiRequest {
+                        id,
+                        kind,
+                        title,
+                        text,
+                    });
+                    Ok(())
+                })?,
+            )?;
+        }
+        api.set("utils", utils)?;
+        lua.globals().set("chatcraft", api)?;
+        counter.set(0);
         lua.load(source).exec()?;
-        Ok(Self { lua, counter })
+        Ok(Self {
+            lua,
+            counter,
+            callbacks,
+            queue,
+        })
+    }
+
+    pub(crate) fn respond(&self, id: u64, confirmed: bool) -> Option<mlua::Result<()>> {
+        let key = self.callbacks.borrow_mut().remove(&id)?;
+        {
+            let mut queue = self.queue.borrow_mut();
+            queue.pending -= 1;
+            queue.requests.retain(|request| request.id != id);
+        }
+        let result = (|| {
+            let callback: mlua::Function = self.lua.registry_value(&key)?;
+            self.lua.remove_registry_value(key)?;
+            self.counter.set(0);
+            callback.call::<()>(confirmed)
+        })();
+        Some(result)
     }
 
     pub fn from_file(path: &std::path::Path) -> std::io::Result<Self> {
@@ -67,19 +186,68 @@ impl LuaFilter {
         self.call_filter("filter_ui", item)
     }
 
+    /// Metadata is optional; non-string fields are ignored.
+    pub fn metadata(&self) -> crate::engine::ScriptMetadata {
+        let mut metadata = crate::engine::ScriptMetadata::default();
+        if let Ok(Value::Table(table)) = self.lua.globals().get::<Value>("script") {
+            let string = |key| match table.raw_get::<Value>(key) {
+                Ok(Value::String(s)) => s.to_str().ok().map(|s| s.to_string()),
+                _ => None,
+            };
+            metadata.name = string("name");
+            metadata.version = string("version");
+            metadata.description = string("description");
+            metadata.author = string("author");
+            metadata.update_url = string("update_url");
+        }
+        metadata
+    }
+
+    /// Namespaced callbacks take precedence; nil does not invoke the legacy callback.
+    pub fn call(&self, name: &str, item: &impl serde::Serialize) -> mlua::Result<Value> {
+        self.counter.set(0);
+        let (hook, legacy) = match name {
+            "filter" => ("filter_message", "on_message"),
+            "filter_ui" => ("filter_ui", "on_ui"),
+            "on_chat" => ("filter_chat_list", "on_chat"),
+            other => (other, other),
+        };
+        let globals = self.lua.globals();
+        let namespaced = match globals.raw_get::<Value>("chatcraft")? {
+            Value::Table(table) => {
+                let current = table.raw_get::<Value>(hook)?;
+                if matches!(current, Value::Function(_)) {
+                    current
+                } else {
+                    table.raw_get::<Value>(legacy)?
+                }
+            }
+            _ => Value::Nil,
+        };
+        let callback = if matches!(namespaced, Value::Function(_)) {
+            namespaced
+        } else if name == "filter" || name == "filter_ui" {
+            globals.raw_get::<Value>(name)?
+        } else {
+            Value::Nil
+        };
+        match callback {
+            Value::Function(f) => f.call(self.lua.to_value(item)?),
+            _ => Ok(Value::Nil),
+        }
+    }
+
+    pub fn decode<T: serde::de::DeserializeOwned>(&self, value: Value) -> mlua::Result<T> {
+        self.lua.from_value(value)
+    }
+
     fn call_filter(
         &self,
         name: &str,
         item: &impl serde::Serialize,
     ) -> mlua::Result<Option<(Action, Option<String>)>> {
         self.counter.set(0);
-        let globals = self.lua.globals();
-        let f: Value = globals.get(name)?;
-        let Value::Function(f) = f else {
-            return Ok(None);
-        };
-        let arg = self.lua.to_value(item)?;
-        match f.call::<Value>(arg) {
+        match self.call(name, item) {
             Ok(Value::String(s)) => Ok(parse_action(s.to_str()?.as_ref()).map(|a| (a, None))),
             Ok(Value::Table(t)) => {
                 let action: Option<String> = t.get("action").ok();

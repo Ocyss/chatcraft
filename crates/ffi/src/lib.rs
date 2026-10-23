@@ -2,6 +2,25 @@
 //!
 //! 所有字符串均为 UTF-8 JSON。返回的字符串必须用 `chatcraft_string_free`
 //! 释放；引擎句柄用 `chatcraft_engine_free` 释放。
+//!
+//! Async UI protocol for desktop hosts:
+//! - Lua `chatcraft.utils.alert(title, text)` and
+//!   `chatcraft.utils.confirm(title, text, callback)` only enqueue, returning nil.
+//! - Poll `chatcraft_ui_requests` after loading, filtering, lifecycle calls and
+//!   responses. It drains a FIFO array of `{id,kind,title,text}`; `kind` is
+//!   `alert` or `confirm`. IDs are positive integers unique within this engine,
+//!   bounded to 2^53-1. Never route an old engine's response to a replacement.
+//! - Show dialogs on the Qt UI thread; send confirm acceptance as true and
+//!   rejection/close as false via `chatcraft_ui_respond` on the engine thread.
+//!   Alerts do not accept responses. Keep polling to receive callback requests.
+//! - Capacity is 128 queued alerts plus outstanding confirms (including drained
+//!   confirms). Overflow/invalid utility arguments raise a Lua error and do not
+//!   enqueue. Filter errors fail open; failed script loads discard their requests.
+//! - Responding consumes the callback before invocation, resets its instruction
+//!   budget, and releases its registry entry. Callback errors return ok:false;
+//!   unknown/duplicate IDs also return ok:false. Closing/freeing an engine drops
+//!   all outstanding callbacks. All engine operations must stay on its creating
+//!   thread, without concurrent or reentrant host calls.
 
 use std::ffi::{CStr, CString, c_char};
 use std::panic::AssertUnwindSafe;
@@ -112,6 +131,96 @@ pub unsafe extern "C" fn chatcraft_filter_ui(
     }
 }
 
+/// Filter a ChatListItem JSON; returns ChatListOutcome JSON or null.
+///
+/// # Safety
+/// Handle must be live on its creating thread; input must be null or a valid
+/// NUL-terminated UTF-8 string. Free returned strings with chatcraft_string_free.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chatcraft_filter_chat(
+    engine: *const Engine,
+    input: *const c_char,
+) -> *mut c_char {
+    json_request(engine, input, |engine, value| {
+        let item: chatcraft_core::ChatListItem = serde_json::from_value(value).ok()?;
+        serde_json::to_value(engine.filter_chat(&item)).ok()
+    })
+}
+
+/// Input is {"event":"startup"} or {"event":"manager_open"}.
+/// Returns an array of ScriptPopup objects; repeated startup returns [].
+///
+/// # Safety
+/// Same handle, input and ownership requirements as chatcraft_filter_chat.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chatcraft_lifecycle(
+    engine: *const Engine,
+    input: *const c_char,
+) -> *mut c_char {
+    json_request(engine, input, |engine, value| {
+        let event = serde_json::from_value(value.get("event")?.clone()).ok()?;
+        serde_json::to_value(engine.lifecycle(event)).ok()
+    })
+}
+
+/// Drain queued alerts and confirms as [{id,kind,title,text}]. Empty queue: [].
+/// Pending confirms survive draining; alerts need no response.
+///
+/// # Safety
+/// Handle must be null or live on its creating thread. Free returned JSON with
+/// chatcraft_string_free. Null handle or internal failure returns null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chatcraft_ui_requests(engine: *const Engine) -> *mut c_char {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let engine = unsafe { engine.as_ref() }?;
+        serde_json::to_string(&engine.ui_requests()).ok()
+    }));
+    match result {
+        Ok(Some(json)) => into_c_string(json),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// Respond with {"id": positive_integer, "confirmed": boolean}.
+/// Returns {"ok":true} or {"ok":false,"error":"..."}. Invalid input/handle
+/// returns null. Callback errors consume the ID; duplicate/unknown IDs fail.
+/// Callbacks execute synchronously, may enqueue more requests, and are bounded
+/// by a fresh instruction budget. Never call concurrently or from a Qt UI
+/// thread different from the engine's creating thread; marshal responses there.
+///
+/// # Safety
+/// Same handle, input and string ownership requirements as chatcraft_filter_chat.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chatcraft_ui_respond(
+    engine: *const Engine,
+    input: *const c_char,
+) -> *mut c_char {
+    json_request(engine, input, |engine, value| {
+        let id = value.get("id")?.as_u64()?;
+        let confirmed = value.get("confirmed")?.as_bool()?;
+        Some(match engine.ui_respond(id, confirmed) {
+            Ok(()) => serde_json::json!({"ok":true}),
+            Err(error) => serde_json::json!({"ok":false,"error":error}),
+        })
+    })
+}
+
+fn json_request(
+    engine: *const Engine,
+    input: *const c_char,
+    callback: impl FnOnce(&Engine, serde_json::Value) -> Option<serde_json::Value>,
+) -> *mut c_char {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let engine = unsafe { engine.as_ref() }?;
+        let input = serde_json::from_str(read_str(input)?).ok()?;
+        serde_json::to_string(&callback(engine, input)?).ok()
+    }));
+    match result {
+        Ok(Some(json)) => into_c_string(json),
+        _ => std::ptr::null_mut(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +230,91 @@ mod tests {
         let json = serde_json::from_str(unsafe { CStr::from_ptr(ptr) }.to_str().unwrap()).unwrap();
         unsafe { chatcraft_string_free(ptr) };
         json
+    }
+
+    #[test]
+    fn asynchronous_ui_protocol() {
+        let path =
+            std::env::temp_dir().join(format!("chatcraft-ffi-ui-{}.lua", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"
+            chatcraft.utils.alert('notice', 'hello')
+            chatcraft.utils.confirm('question', 'continue?', function(confirmed)
+                chatcraft.utils.alert('answer', tostring(confirmed))
+            end)
+        "#,
+        )
+        .unwrap();
+        let config = CString::new(serde_json::json!({"lua_script":path}).to_string()).unwrap();
+        unsafe {
+            let engine = chatcraft_engine_new(config.as_ptr());
+            assert!(!engine.is_null());
+            let requests = take_json(chatcraft_ui_requests(engine));
+            assert_eq!(requests.as_array().unwrap().len(), 2);
+            assert_eq!(requests[0]["kind"], "alert");
+            assert_eq!(requests[1]["kind"], "confirm");
+            assert!(requests[1]["id"].as_u64().is_some());
+            assert_eq!(
+                take_json(chatcraft_ui_requests(engine)),
+                serde_json::json!([])
+            );
+            for invalid in [
+                "{",
+                "{}",
+                r#"{"id":1}"#,
+                r#"{"id":2,"confirmed":1}"#,
+                r#"{"id":-1,"confirmed":true}"#,
+            ] {
+                let input = CString::new(invalid).unwrap();
+                assert!(chatcraft_ui_respond(engine, input.as_ptr()).is_null());
+            }
+            let input = CString::new(
+                serde_json::json!({"id":requests[1]["id"],"confirmed":false}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(
+                take_json(chatcraft_ui_respond(engine, input.as_ptr())),
+                serde_json::json!({"ok":true})
+            );
+            let requests = take_json(chatcraft_ui_requests(engine));
+            assert_eq!(requests[0]["text"], "false");
+            let duplicate = take_json(chatcraft_ui_respond(engine, input.as_ptr()));
+            assert_eq!(duplicate["ok"], false);
+            assert!(duplicate["error"].is_string());
+            assert!(chatcraft_ui_requests(std::ptr::null()).is_null());
+            assert!(chatcraft_ui_respond(std::ptr::null(), input.as_ptr()).is_null());
+            assert!(chatcraft_ui_respond(engine, std::ptr::null()).is_null());
+            chatcraft_engine_free(engine);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn chat_lifecycle_protocol_and_invalid_input() {
+        unsafe {
+            let engine = chatcraft_engine_new(std::ptr::null());
+            let chat = CString::new(r#"{"chat_id":1,"chat_type":"group","title":"x","folder_ids":[2],"folder_count":1,"folder_id":2,"unread":false}"#).unwrap();
+            assert_eq!(
+                take_json(chatcraft_filter_chat(engine, chat.as_ptr())),
+                serde_json::json!({"hide":false,"priority":0})
+            );
+            for event in ["startup", "startup", "manager_open"] {
+                let input = CString::new(serde_json::json!({"event":event}).to_string()).unwrap();
+                assert_eq!(
+                    take_json(chatcraft_lifecycle(engine, input.as_ptr())),
+                    serde_json::json!([])
+                );
+            }
+            for invalid in ["{", "{}", r#"{"event":"unknown"}"#] {
+                let input = CString::new(invalid).unwrap();
+                assert!(chatcraft_filter_chat(engine, input.as_ptr()).is_null());
+                assert!(chatcraft_lifecycle(engine, input.as_ptr()).is_null());
+            }
+            assert!(chatcraft_filter_chat(engine, std::ptr::null()).is_null());
+            assert!(chatcraft_lifecycle(std::ptr::null(), chat.as_ptr()).is_null());
+            chatcraft_engine_free(engine);
+        }
     }
 
     #[test]

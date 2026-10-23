@@ -180,7 +180,7 @@ jobs:
           -D CMAKE_CONFIGURATION_TYPES=Debug ^
           -D CMAKE_COMPILE_WARNING_AS_ERROR=ON ^
           -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
-          -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF ^
+          -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
           -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF
           if errorlevel 1 exit /b 1
 
@@ -191,12 +191,20 @@ jobs:
           set OUT=%TBUILD%\desktop\out\Debug
           mkdir artifact
           mkdir artifact\scripts
-          copy examples\lua\ui_filter.lua artifact\scripts\ui_filter.lua.example
-          echo Place .lua files here, then restart Telegram.>artifact\scripts\README.txt
+          copy examples\lua\welcome.lua artifact\scripts\welcome.lua
+          copy README.md artifact\scripts\README.md
+          copy README.md artifact\README.md
+          mkdir artifact\scripts\types
+          copy docs\lua\chatcraft.lua artifact\scripts\types\chatcraft.lua
+          echo {"runtime":{"version":"Lua 5.4"},"workspace":{"library":["types"],"checkThirdParty":false}}>artifact\scripts\.luarc.json
+          mkdir artifact\examples
+          copy examples\lua\chat_list.lua artifact\examples\chat_list.lua
+          copy examples\lua\ad_filter.lua artifact\examples\ad_filter.lua
+          copy examples\lua\ui_filter.lua artifact\examples\ui_filter.lua
           echo Source commit: %GITHUB_SHA%>artifact\BUILD-INFO.txt
           echo Desktop UI: script manager, folder opener, stable ID filtering>>artifact\BUILD-INFO.txt
           move %OUT%\Telegram.exe artifact/
-          move %OUT%\Updater.exe artifact/
+          rem Official auto-update is disabled; do not distribute Updater.exe.
 
       - uses: actions/upload-artifact@v4
         name: Upload artifact.

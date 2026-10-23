@@ -1,5 +1,13 @@
--- Copy into the script directory next to the Desktop executable, then restart.
--- Stable semantic IDs: no translated labels, phone numbers or list positions.
+-- 非默认示例：复制到实际脚本目录，完全退出（包括托盘）并重启后生效。
+---@type ChatcraftScriptMetadata
+script = {
+    name = "界面精简",
+    version = "1.0",
+    description = "隐藏宿主已接入的手机号确认、会员与星星入口",
+    author = "Chatcraft",
+}
+
+---@type table<string, boolean>
 local hidden = {
     ["dialogs.confirm_phone"] = true,
     ["settings.premium"] = true,
@@ -8,9 +16,11 @@ local hidden = {
     ["main_menu.my_stars"] = true,
 }
 
-function filter_ui(item)
+---@param item ChatcraftUIItem
+---@return ChatcraftFilterResult
+function chatcraft.filter_ui(item)
     if hidden[item.id] then
-        return { action = "hide", reason = "Hidden by ui_filter.lua" }
+        return { action = "hide", reason = "界面精简示例" }
     end
-    -- nil leaves this item unchanged and lets other scripts evaluate it.
+    return nil
 end

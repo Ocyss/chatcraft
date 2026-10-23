@@ -47,6 +47,59 @@ pub struct ScriptStatus {
     pub name: String,
     pub loaded: bool,
     pub error: Option<String>,
+    pub metadata: ScriptMetadata,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptMetadata {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub update_url: Option<String>,
+}
+
+/// One row in the currently displayed folder; folder_ids lists all memberships.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatListItem {
+    pub chat_id: i64,
+    pub chat_type: crate::message::ChatType,
+    pub title: String,
+    #[serde(default)]
+    pub folder_ids: Vec<i64>,
+    pub folder_count: usize,
+    pub folder_id: i64,
+    #[serde(default)]
+    pub unread: bool,
+    #[serde(default)]
+    pub unread_count: u32,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+/// Higher priority sorts first. Preserve native order for ties.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatListOutcome {
+    #[serde(default)]
+    pub hide: bool,
+    #[serde(default)]
+    pub priority: i32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleEvent {
+    Startup,
+    ManagerOpen,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptPopup {
+    pub path: std::path::PathBuf,
+    pub title: String,
+    pub text: String,
 }
 
 /// Platform-independent UI identity; IDs must not depend on localized labels.
@@ -67,6 +120,8 @@ pub struct Engine {
     rules: RuleSet,
     lua: Vec<LuaFilter>,
     scripts: Vec<ScriptStatus>,
+    startup_called: std::cell::Cell<bool>,
+    ui_queue: std::rc::Rc<std::cell::RefCell<crate::lua::UiQueue>>,
 }
 
 impl Engine {
@@ -77,19 +132,28 @@ impl Engine {
             .map_err(|e| format!("rule compile error: {e}"))?;
         let mut lua = Vec::new();
         let mut scripts = Vec::new();
+        let ui_queue = std::rc::Rc::new(std::cell::RefCell::new(crate::lua::UiQueue::default()));
+        let load = |path: &std::path::Path| -> Result<LuaFilter, String> {
+            let source = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+            let checkpoint = ui_queue.borrow().clone();
+            let result =
+                LuaFilter::with_queue(&source, ui_queue.clone()).map_err(|e| e.to_string());
+            if result.is_err() {
+                *ui_queue.borrow_mut() = checkpoint;
+            }
+            result
+        };
         let legacy = match &config.lua_script {
-            Some(path) => Some(
-                LuaFilter::from_file(path)
-                    .map_err(|e| format!("lua load error ({}): {e}", path.display()))?,
-            ),
+            Some(path) => {
+                Some(load(path).map_err(|e| format!("lua load error ({}): {e}", path.display()))?)
+            }
             None => None,
         };
         if let Some(filter) = legacy {
+            let mut status = script_status(config.lua_script.as_ref().unwrap().clone(), None);
+            status.metadata = filter.metadata();
             lua.push(filter);
-            scripts.push(script_status(
-                config.lua_script.as_ref().unwrap().clone(),
-                None,
-            ));
+            scripts.push(status);
         }
         if let Some(dir) = config.script_dir {
             match std::fs::read_dir(&dir) {
@@ -112,10 +176,12 @@ impl Engine {
                     }
                     paths.sort();
                     for path in paths {
-                        match LuaFilter::from_file(&path) {
+                        match load(&path) {
                             Ok(filter) => {
+                                let mut status = script_status(path, None);
+                                status.metadata = filter.metadata();
                                 lua.push(filter);
-                                scripts.push(script_status(path, None));
+                                scripts.push(status);
                             }
                             Err(error) => {
                                 scripts.push(script_status(path, Some(error.to_string())))
@@ -130,7 +196,76 @@ impl Engine {
             rules,
             lua,
             scripts,
+            startup_called: std::cell::Cell::new(false),
+            ui_queue,
         })
+    }
+
+    /// Drain UI requests; pending confirm callbacks remain until responded to.
+    pub fn ui_requests(&self) -> Vec<crate::lua::UiRequest> {
+        self.ui_queue.borrow_mut().drain()
+    }
+
+    /// A confirmation is consumed even if its callback fails. IDs are engine-local.
+    pub fn ui_respond(&self, id: u64, confirmed: bool) -> Result<(), String> {
+        for lua in &self.lua {
+            if let Some(result) = lua.respond(id, confirmed) {
+                return result.map_err(|e| e.to_string());
+            }
+        }
+        Err("unknown or already answered confirmation ID".into())
+    }
+
+    /// Hide is OR-combined; the first valid callback supplies priority.
+    /// Invalid results and runtime errors are ignored.
+    pub fn filter_chat(&self, item: &ChatListItem) -> ChatListOutcome {
+        let mut outcome = ChatListOutcome::default();
+        let mut priority_set = false;
+        for lua in &self.lua {
+            let result = lua
+                .call("on_chat", item)
+                .and_then(|v| lua.decode::<ChatListOutcome>(v));
+            if let Ok(result) = result {
+                outcome.hide |= result.hide;
+                if !priority_set {
+                    outcome.priority = result.priority;
+                    priority_set = true;
+                }
+            }
+        }
+        outcome
+    }
+
+    /// Startup is once per engine, not once per installation. The host persists
+    /// any installation-level first-run policy. ManagerOpen runs on every call.
+    pub fn lifecycle(&self, event: LifecycleEvent) -> Vec<ScriptPopup> {
+        if matches!(event, LifecycleEvent::Startup) && self.startup_called.replace(true) {
+            return Vec::new();
+        }
+        let name = match event {
+            LifecycleEvent::Startup => "on_startup",
+            LifecycleEvent::ManagerOpen => "on_manager_open",
+        };
+        #[derive(Deserialize)]
+        struct Popup {
+            title: String,
+            text: String,
+        }
+        self.lua
+            .iter()
+            .zip(self.scripts.iter().filter(|s| s.loaded))
+            .filter_map(|(lua, status)| {
+                let popup = lua
+                    .call(name, &serde_json::json!({"event": event}))
+                    .and_then(|v| lua.decode::<Popup>(v))
+                    .ok()?;
+                Some(ScriptPopup {
+                    path: status.path.clone(),
+                    title: popup.title,
+                    text: popup.text,
+                })
+            })
+            .collect()
     }
 
     /// Script load statuses, including failures that did not prevent startup.
@@ -203,6 +338,7 @@ fn script_status(path: std::path::PathBuf, error: Option<String>) -> ScriptStatu
         loaded: error.is_none(),
         path,
         error,
+        metadata: ScriptMetadata::default(),
     }
 }
 

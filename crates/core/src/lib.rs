@@ -8,6 +8,9 @@ pub mod lua;
 pub mod message;
 pub mod rules;
 
-pub use engine::{Engine, EngineConfig, FilterOutcome, ScriptStatus, UiFilterOutcome, UiItem};
+pub use engine::{
+    ChatListItem, ChatListOutcome, Engine, EngineConfig, FilterOutcome, LifecycleEvent,
+    ScriptMetadata, ScriptPopup, ScriptStatus, UiFilterOutcome, UiItem,
+};
 pub use message::{ChatType, Message};
 pub use rules::{Action, Rule, RuleSet};
