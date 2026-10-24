@@ -8,7 +8,7 @@ script = {
 
 ---@param msg ChatcraftMessage
 ---@return ChatcraftFilterResult
-function chatcraft.filter_message(msg)
+chatcraft.register_filter_message(function(msg)
     if msg.chat_type == "channel" then
         local spam_words = { "推广", "代开", "空投" }
         for _, word in ipairs(spam_words) do
@@ -18,11 +18,16 @@ function chatcraft.filter_message(msg)
         end
     end
 
+    return nil
+end)
+
+-- 同脚本第二个 handler，不会覆盖关键词过滤；不匹配返回 nil。
+chatcraft.register_filter_message(function(msg)
     -- 保留折叠意图示例；当前桌面尚无 collapse 显示效果。
     if msg.chat_type == "group" and msg.is_forwarded then
         return "collapse"
     end
 
-    -- 不截断后续脚本的消息决策。
+    -- 不截断后续 handler 或脚本的消息决策。
     return nil
-end
+end)

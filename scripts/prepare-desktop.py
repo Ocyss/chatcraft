@@ -27,6 +27,8 @@ REQUIRED = {
         "chatcraft_filter_ui",
         "chatcraft_scripts_status",
         "chatcraft_filter_chat",
+        "chatcraft_filter_chats",
+        "bool FilteringAvailable()",
         "chatcraft_lifecycle",
         "chatcraft_ui_requests",
         "chatcraft_ui_respond",
@@ -47,6 +49,19 @@ REQUIRED = {
         "_chatcraftProjection",
     ),
     "Telegram/SourceFiles/dialogs/dialogs_inner_widget.h": ("_chatcraftProjection",),
+    "Telegram/SourceFiles/dialogs/dialogs_community_requestable_list.cpp": (
+        "return filter(result)",
+    ),
+    "Telegram/SourceFiles/dialogs/dialogs_community_requestable_list.h": (
+        "Filter filter",
+    ),
+    "Telegram/SourceFiles/main/main_domain.h": ("CHATCRAFT_MAX_ACCOUNTS",),
+    "Telegram/SourceFiles/mtproto/session_private.cpp": ("Chatcraft ",),
+    "Telegram/cmake/telegram_options.cmake": (
+        "CHATCRAFT_API_ID",
+        "CHATCRAFT_API_HASH",
+        "CHATCRAFT_MAX_ACCOUNTS",
+    ),
     "Telegram/SourceFiles/core/application.cpp": (
         'Chatcraft::ShowLifecycleNotifications(u"startup"_q)',
     ),

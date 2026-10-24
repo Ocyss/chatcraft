@@ -87,6 +87,45 @@ does not modify Telegram protocol, update, or data-format version numbers.
 Do not automatically advance the root submodule to an untested fork head.
 Textual merge success is not evidence of behavioral compatibility.
 
+## Telegram application identity and local accounts
+
+Register Chatcraft at https://my.telegram.org with the application title
+`Chatcraft`. Configure repository Actions secrets `CHATCRAFT_API_ID` and
+`CHATCRAFT_API_HASH`; Desktop CI fails early when they are unavailable (including
+fork PRs). No upstream test-credential fallback is allowed.
+
+Local builds accept those same environment variables, or explicit CMake options
+`-DTDESKTOP_API_ID=<your-id> -DTDESKTOP_API_HASH=<your-hash>`. Explicit options
+win; environment values are not copied into CMakeCache.txt. Clear old cached
+credentials before switching to environment injection. Never commit credentials,
+cache files, build directories or verbose compiler logs: generated compiler
+commands and the executable necessarily contain API credentials. A distributed
+native client cannot keep its embedded API hash secret from binary inspection.
+
+Native MTProto `initConnection.app_version` is prefixed with `Chatcraft `;
+upstream numeric protocol/update versions and real device/OS fields are retained.
+The application name shown by other Telegram clients also depends on the server's
+application registration for the API ID. Verify it using a newly authorized
+session on another device; changing a version field alone cannot guarantee the
+server-provided name or rename historical sessions.
+
+`-DCHATCRAFT_MAX_ACCOUNTS=6` configures local account capacity at build time
+(default 6, accepted range 1–20). This replaces the local Premium-dependent
+3–6 account capacity with the configured capacity for all local accounts. It
+neither grants Premium nor removes Telegram login, flood, authorization or other
+server-side limits. Restart using the rebuilt executable to apply it. Do not
+lower capacity below the number of saved accounts without first removing excess
+accounts through the UI; existing storage is not automatically deleted.
+
+Lua is not used for these settings: API credentials and connection identity are
+needed during native MTProto/login initialization, before message-filter scripts
+are an appropriate configuration layer. Exposing credentials to user scripts
+would also unnecessarily broaden access to them.
+
+Native changes live in the Desktop submodule and must be published in the fork
+and the root pin advanced before a clean CI checkout can consume them; they are
+not part of the UI overlay.
+
 ## Configuration
 
 - `CHATCRAFT_SCRIPT_DIR`: override the default `scripts/` next to Telegram.exe.

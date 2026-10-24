@@ -41,11 +41,15 @@ use crate::rules::Action;
 
 /// 单条消息允许执行的最大 Lua 指令数，防止死循环拖垮 UI 线程。
 const INSTRUCTION_LIMIT: u32 = 1_000_000;
+const HOOK_INTERVAL: u32 = 1_000;
+
+type Handlers = Rc<RefCell<HashMap<String, Vec<mlua::Function>>>>;
 
 pub struct LuaFilter {
     lua: Lua,
     counter: std::rc::Rc<std::cell::Cell<u32>>,
     callbacks: Callbacks,
+    handlers: Handlers,
     queue: Rc<RefCell<UiQueue>>,
 }
 
@@ -59,6 +63,30 @@ impl LuaFilter {
         let counter = Self::install_instruction_limit(&lua);
         let callbacks: Callbacks = Rc::default();
         let api = lua.create_table()?;
+        let handlers: Handlers = Rc::default();
+        for hook in ["filter_message", "filter_ui", "filter_chat_list"] {
+            let handlers = handlers.clone();
+            api.set(
+                format!("register_{hook}"),
+                lua.create_function(move |_, args: mlua::MultiValue| {
+                    let handler = match (args.len(), args.front()) {
+                        (1, Some(Value::Function(handler))) => handler,
+                        _ => {
+                            return Err(mlua::Error::RuntimeError(
+                                "registration requires exactly one function (use dot syntax)"
+                                    .into(),
+                            ));
+                        }
+                    };
+                    handlers
+                        .borrow_mut()
+                        .entry(hook.into())
+                        .or_default()
+                        .push(handler.clone());
+                    Ok(())
+                })?,
+            )?;
+        }
         let utils = lua.create_table()?;
         for kind in ["alert", "confirm"] {
             let queue = queue.clone();
@@ -124,6 +152,7 @@ impl LuaFilter {
             lua,
             counter,
             callbacks,
+            handlers,
             queue,
         })
     }
@@ -155,11 +184,11 @@ impl LuaFilter {
         let counter = std::rc::Rc::new(Cell::new(0u32));
         let hook_counter = counter.clone();
         lua.set_hook(
-            mlua::HookTriggers::new().every_nth_instruction(1),
+            mlua::HookTriggers::new().every_nth_instruction(HOOK_INTERVAL),
             move |_lua, _dbg| {
-                let c = hook_counter.get() + 1;
+                let c = hook_counter.get().saturating_add(HOOK_INTERVAL);
                 hook_counter.set(c);
-                if c > INSTRUCTION_LIMIT {
+                if c >= INSTRUCTION_LIMIT {
                     Err(mlua::Error::RuntimeError(
                         "lua instruction limit exceeded".into(),
                     ))
@@ -231,9 +260,53 @@ impl LuaFilter {
         } else {
             Value::Nil
         };
-        match callback {
-            Value::Function(f) => f.call(self.lua.to_value(item)?),
-            _ => Ok(Value::Nil),
+        // Snapshot registrations so callbacks may register handlers for future calls.
+        let mut handlers = self
+            .handlers
+            .borrow()
+            .get(hook)
+            .cloned()
+            .unwrap_or_default();
+        if handlers.is_empty() {
+            return match callback {
+                Value::Function(f) => f.call(self.lua.to_value(item)?),
+                _ => Ok(Value::Nil),
+            };
+        }
+        if let Value::Function(f) = callback {
+            handlers.push(f);
+        }
+        let mut first = Value::Nil;
+        let mut chat: Option<crate::engine::ChatListOutcome> = None;
+        for handler in handlers {
+            self.counter.set(0);
+            let value = match handler.call::<Value>(self.lua.to_value(item)?) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("chatcraft lua handler error: {error}");
+                    continue;
+                }
+            };
+            if hook == "filter_chat_list" {
+                if let Ok(result) = self.decode::<crate::engine::ChatListOutcome>(value) {
+                    if let Some(outcome) = &mut chat {
+                        outcome.hide |= result.hide;
+                    } else {
+                        chat = Some(result);
+                    }
+                }
+            } else if let Some((action, _)) = decode_action(&value) {
+                if hook == "filter_message" || action == Action::Hide {
+                    return Ok(value);
+                }
+                if matches!(first, Value::Nil) {
+                    first = value;
+                }
+            }
+        }
+        match chat {
+            Some(outcome) => self.lua.to_value(&outcome),
+            None => Ok(first),
         }
     }
 
@@ -260,6 +333,18 @@ impl LuaFilter {
                 Ok(None)
             }
         }
+    }
+}
+
+fn decode_action(value: &Value) -> Option<(Action, Option<String>)> {
+    match value {
+        Value::String(s) => parse_action(s.to_str().ok()?.as_ref()).map(|a| (a, None)),
+        Value::Table(t) => {
+            let action: String = t.get("action").ok()?;
+            let reason: Option<String> = t.get("reason").ok();
+            parse_action(&action).map(|a| (a, reason))
+        }
+        _ => None,
     }
 }
 

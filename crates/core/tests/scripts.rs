@@ -1,6 +1,85 @@
 use chatcraft_core::{Engine, EngineConfig, UiItem};
 use std::path::PathBuf;
 
+#[test]
+fn registered_handlers_aggregate_and_isolate_failures() {
+    use chatcraft_core::{ChatListItem, Message};
+    let scripts = Scripts::new();
+    scripts.write(
+        "a.lua",
+        r#"
+        chatcraft.register_filter_message(function(m) while true do end end)
+        chatcraft.register_filter_message(function(m) return {action='invalid'} end)
+        chatcraft.register_filter_message(function(m) return 'allow' end)
+        chatcraft.register_filter_message(function(m) error('must short circuit') end)
+        function chatcraft.filter_message(m) return 'hide' end
+        chatcraft.register_filter_ui(function(i) error('bad') end)
+        chatcraft.register_filter_ui(function(i) return 'allow' end)
+        chatcraft.register_filter_ui(function(i) return {action='hide',reason='registered'} end)
+        function chatcraft.filter_ui(i) return {action='hide',reason='single'} end
+        chatcraft.register_filter_chat_list(function(c) while true do end end)
+        chatcraft.register_filter_chat_list(function(c) return {priority='bad'} end)
+        chatcraft.register_filter_chat_list(function(c) return {priority=7} end)
+        chatcraft.register_filter_chat_list(function(c) return {hide=true,priority=99} end)
+        function chatcraft.filter_chat_list(c) return {priority=-1} end
+    "#,
+    );
+    let engine = scripts.engine();
+    let msg: Message = serde_json::from_value(serde_json::json!({
+        "id":1,"chat_id":1,"chat_type":"group","text":"x"
+    }))
+    .unwrap();
+    assert_eq!(
+        engine.filter(&msg).action,
+        chatcraft_core::rules::Action::Allow
+    );
+    assert_eq!(
+        engine.filter_ui(&item("x")).reason.as_deref(),
+        Some("registered")
+    );
+    let chat: ChatListItem = serde_json::from_value(serde_json::json!({
+        "chat_id":1,"chat_type":"group","title":"x","folder_count":0,"folder_id":0
+    }))
+    .unwrap();
+    let outcome = engine.filter_chat(&chat);
+    assert!(outcome.hide);
+    assert_eq!(outcome.priority, 7);
+}
+
+#[test]
+fn registration_validation_and_single_callback_compatibility() {
+    let scripts = Scripts::new();
+    scripts.write(
+        "a.lua",
+        r#"
+        for _, register in ipairs({chatcraft.register_filter_message,
+            chatcraft.register_filter_ui, chatcraft.register_filter_chat_list}) do
+            assert(not pcall(register))
+            assert(not pcall(register, {}))
+            assert(not pcall(register, function() end, function() end))
+            assert(not pcall(register, chatcraft, function() end))
+        end
+        function filter_ui(i) return 'hide' end
+        function chatcraft.on_ui(i) return 'hide' end
+        function chatcraft.filter_ui(i) return 'hide' end
+        function chatcraft.filter_ui(i) return nil end
+        chatcraft.register_filter_ui(function(i) return 'nonsense' end)
+    "#,
+    );
+    assert!(!scripts.engine().filter_ui(&item("x")).hide);
+    scripts.write(
+        "a.lua",
+        r#"
+        chatcraft.register_filter_ui(function(i) error('bad') end)
+        function filter_ui(i) return {action='hide',reason='legacy'} end
+    "#,
+    );
+    assert_eq!(
+        scripts.engine().filter_ui(&item("x")).reason.as_deref(),
+        Some("legacy")
+    );
+}
+
 struct Scripts(PathBuf);
 impl Scripts {
     fn new() -> Self {
@@ -159,13 +238,11 @@ fn load_and_callback_limits_fail_open_and_reset() {
     scripts.write("b.lua", "function filter_ui(item) if item.id == 'loop' then while true do end end if item.id == 'error' then error('bad callback') end return 'hide' end");
     let engine = scripts.engine();
     assert!(!engine.scripts_status()[0].loaded);
-    assert!(
-        engine.scripts_status()[0]
-            .error
-            .as_ref()
-            .unwrap()
-            .contains("instruction limit")
-    );
+    assert!(engine.scripts_status()[0]
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("instruction limit"));
     assert!(!engine.filter_ui(&item("loop")).hide);
     assert!(!engine.filter_ui(&item("error")).hide);
     assert!(engine.filter_ui(&item("ok")).hide);
@@ -181,13 +258,11 @@ fn missing_directory_reported_and_legacy_behavior_preserved() {
     .unwrap();
     assert!(!engine.scripts_status()[0].loaded);
     assert!(!engine.filter_ui(&item("anything")).hide);
-    assert!(
-        Engine::new(EngineConfig {
-            lua_script: Some(scripts.0.join("missing.lua")),
-            ..Default::default()
-        })
-        .is_err()
-    );
+    assert!(Engine::new(EngineConfig {
+        lua_script: Some(scripts.0.join("missing.lua")),
+        ..Default::default()
+    })
+    .is_err());
     scripts.write(
         "legacy.txt",
         "function filter_ui(item) return {action='hide', reason='legacy'} end",
@@ -302,7 +377,7 @@ fn new_callbacks_take_precedence_without_falling_back_on_nil_or_error() {
 
 #[test]
 fn async_ui_requests_callbacks_and_limits() {
-    use chatcraft_core::{LifecycleEvent, lua::UI_REQUEST_LIMIT};
+    use chatcraft_core::{lua::UI_REQUEST_LIMIT, LifecycleEvent};
     let scripts = Scripts::new();
     scripts.write(
         "a.lua",
@@ -367,12 +442,10 @@ fn pending_confirms_remain_bounded_after_drain_and_callbacks_reset_budget() {
     assert_eq!(requests.len(), 128);
     engine.filter_ui(&item("overflow"));
     assert!(engine.ui_requests().is_empty());
-    assert!(
-        engine
-            .ui_respond(requests[0].id, true)
-            .unwrap_err()
-            .contains("instruction limit")
-    );
+    assert!(engine
+        .ui_respond(requests[0].id, true)
+        .unwrap_err()
+        .contains("instruction limit"));
     assert!(engine.ui_respond(requests[0].id, false).is_err());
     engine.ui_respond(requests[1].id, false).unwrap();
     assert_eq!(engine.ui_requests()[0].text, "recovered");
@@ -407,7 +480,7 @@ fn example_engine(name: &str, expected_name: &str, description: &str) -> Engine 
 
 #[test]
 fn example_ad_filter_keywords_and_unmatched_nil() {
-    use chatcraft_core::{Action, ChatType, Message, lua::LuaFilter};
+    use chatcraft_core::{lua::LuaFilter, Action, ChatType, Message};
     let engine = example_engine(
         "ad_filter.lua",
         "频道推广过滤",
@@ -542,11 +615,9 @@ fn example_welcome_manager_confirmation_then_alert() {
             assert_ne!(alerts[0].id, request.id);
             assert_eq!(alerts[0].title, "Chatcraft Lua 脚本使用说明");
             assert!(alerts[0].text.contains("仅安装可信脚本"));
-            assert!(
-                alerts[0]
-                    .text
-                    .contains("ad_filter.lua、ui_filter.lua、chat_list.lua")
-            );
+            assert!(alerts[0]
+                .text
+                .contains("ad_filter.lua、ui_filter.lua、chat_list.lua"));
         } else {
             assert!(alerts.is_empty());
         }

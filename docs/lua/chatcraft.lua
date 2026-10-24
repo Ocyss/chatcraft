@@ -5,7 +5,8 @@
 -- 各脚本状态独立；显式脚本先加载，再按路径排序加载目录直接子文件 .lua。
 -- 缺失回调、nil、无效结果或回调错误均不决策；不是撤销其他有效规则。
 -- 消息顺序为广告、配置规则、首个有效 Lua 结果；allow 也会终止消息脚本链。
--- 初始化、过滤及异步确认回调有一百万条指令限制，不是墙钟或内存限制。
+-- 初始化、每个过滤 handler 及异步确认回调有一百万条指令限制。
+-- 每 1000 条指令检查一次预算，不是墙钟或内存限制。
 
 ---@alias ChatcraftChatType 'private'|'group'|'supergroup'|'channel'
 
@@ -79,7 +80,16 @@
 
 -- 新回调优先于对应 on_*，再兼容全局 filter/filter_ui；已选回调即使
 -- 返回 nil 或报错也不会回退到同脚本的旧回调。没有全局 chat 或生命周期别名。
+-- register_* 使用点调用，严格接受一个函数，无返回值，可重复注册。
+-- 按注册顺序执行，最后执行按下述兼容规则选出的单 callback。
+-- nil、无效结果及错误不阻断后续 handler；消息首个有效结果胜出（含 allow），
+-- UI 首个 hide 胜出；chat 的 hide 做 OR，首个有效表确定 priority（缺省 0）。
+-- 每次调用快照注册列表，执行中新增的 handler 从下次调用生效。
+-- 普通函数赋值仍然覆盖原字段，不会自动注册；注册不支持移除。
 ---@class ChatcraftAPI
+---@field register_filter_message fun(handler: fun(msg: ChatcraftMessage): ChatcraftFilterResult)
+---@field register_filter_ui fun(handler: fun(item: ChatcraftUIItem): ChatcraftFilterResult)
+---@field register_filter_chat_list fun(handler: fun(chat: ChatcraftChatListItem): ChatcraftChatListResult|nil)
 ---@field utils ChatcraftUtils 仅宿主弹窗 API；不提供 util 或过滤辅助函数。
 ---@field filter_message? fun(msg: ChatcraftMessage): ChatcraftFilterResult 首个有效结果胜出；不匹配应返回 nil。
 ---@field filter_ui? fun(item: ChatcraftUIItem): ChatcraftFilterResult 仅 hide 生效，第一个 hide 胜出；allow 不阻止其他脚本隐藏。

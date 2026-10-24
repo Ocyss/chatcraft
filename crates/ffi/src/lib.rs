@@ -147,6 +147,23 @@ pub unsafe extern "C" fn chatcraft_filter_chat(
     })
 }
 
+/// Filter an array of ChatListItem objects, preserving input order.
+/// Invalid batches return null without evaluating any callbacks.
+///
+/// # Safety
+/// Same handle, input and ownership requirements as chatcraft_filter_chat.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chatcraft_filter_chats(
+    engine: *const Engine,
+    input: *const c_char,
+) -> *mut c_char {
+    json_request(engine, input, |engine, value| {
+        let items: Vec<chatcraft_core::ChatListItem> = serde_json::from_value(value).ok()?;
+        let outcomes: Vec<_> = items.iter().map(|item| engine.filter_chat(item)).collect();
+        serde_json::to_value(outcomes).ok()
+    })
+}
+
 /// Input is {"event":"startup"} or {"event":"manager_open"}.
 /// Returns an array of ScriptPopup objects; repeated startup returns [].
 ///
@@ -315,6 +332,60 @@ mod tests {
             assert!(chatcraft_lifecycle(std::ptr::null(), chat.as_ptr()).is_null());
             chatcraft_engine_free(engine);
         }
+    }
+
+    #[test]
+    fn chat_batch_order_validation_and_callbacks() {
+        let path = std::env::temp_dir().join(format!(
+            "chatcraft-ffi-chat-batch-{}.lua",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "local count = 0; function chatcraft.filter_chat_list(chat) count = count + 1; return {hide = chat.chat_id == 2, priority = count} end",
+        ).unwrap();
+        let config = CString::new(serde_json::json!({"lua_script": path}).to_string()).unwrap();
+        unsafe {
+            let engine = chatcraft_engine_new(config.as_ptr());
+            assert!(!engine.is_null());
+            assert_eq!(
+                take_json(chatcraft_scripts_status(engine))[0]["loaded"],
+                true
+            );
+            let item = serde_json::json!({"chat_id":1,"chat_type":"group","title":"one","folder_count":0,"folder_id":0});
+            let invalid = CString::new(serde_json::json!([item, {}]).to_string()).unwrap();
+            assert!(chatcraft_filter_chats(engine, invalid.as_ptr()).is_null());
+            let input = CString::new(
+                serde_json::json!([
+                    item,
+                    {"chat_id":2,"chat_type":"channel","title":"two","folder_count":0,"folder_id":0},
+                    item
+                ])
+                .to_string(),
+            )
+            .unwrap();
+            assert_eq!(
+                take_json(chatcraft_filter_chats(engine, input.as_ptr())),
+                serde_json::json!([
+                    {"hide":false,"priority":1},
+                    {"hide":true,"priority":2},
+                    {"hide":false,"priority":3}
+                ])
+            );
+            let empty = CString::new("[]").unwrap();
+            assert_eq!(
+                take_json(chatcraft_filter_chats(engine, empty.as_ptr())),
+                serde_json::json!([])
+            );
+            for invalid in ["{", "{}", "null", "[null]"] {
+                let input = CString::new(invalid).unwrap();
+                assert!(chatcraft_filter_chats(engine, input.as_ptr()).is_null());
+            }
+            assert!(chatcraft_filter_chats(engine, std::ptr::null()).is_null());
+            assert!(chatcraft_filter_chats(std::ptr::null(), input.as_ptr()).is_null());
+            chatcraft_engine_free(engine);
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

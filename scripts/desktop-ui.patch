@@ -13,7 +13,7 @@ index 9731af4698..d62e2ba49f 100644
  add_subdirectory(lib_crl)
  add_subdirectory(lib_base)
 diff --git a/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp b/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp
-index 5d3c9b2d5c..25df2dcd36 100644
+index 5d3c9b2d5c..c8e3cf62d2 100644
 --- a/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp
 +++ b/Telegram/SourceFiles/chatcraft/chatcraft_filter.cpp
 @@ -8,31 +8,40 @@
@@ -34,11 +34,11 @@ index 5d3c9b2d5c..25df2dcd36 100644
 -namespace Chatcraft {
 -
 -#ifdef CHATCRAFT_ENABLED
+-
+-extern "C" {
 +#include <cmath>
 +#include <deque>
  
--extern "C" {
--
 -void *chatcraft_engine_new(const char *config_json);
 -void chatcraft_engine_free(void *engine);
 -char *chatcraft_filter_message(const void *engine, const char *message_json);
@@ -71,7 +71,7 @@ index 5d3c9b2d5c..25df2dcd36 100644
    if (const auto raw = qgetenv("CHATCRAFT_CONFIG"); !raw.isEmpty()) {
      return raw.toStdString();
    }
-@@ -53,6 +62,163 @@ bool g_triedInit = false;
+@@ -53,6 +62,164 @@ bool g_triedInit = false;
    return {};
  }
  
@@ -126,6 +126,7 @@ index 5d3c9b2d5c..25df2dcd36 100644
 +char *chatcraft_scripts_status(const void *engine);
 +char *chatcraft_filter_ui(const void *engine, const char *item_json);
 +char *chatcraft_filter_chat(const void *engine, const char *chat_json);
++char *chatcraft_filter_chats(const void *engine, const char *chats_json);
 +char *chatcraft_lifecycle(const void *engine, const char *event_json);
 +char *chatcraft_ui_requests(const void *engine);
 +char *chatcraft_ui_respond(const void *engine, const char *response_json);
@@ -235,7 +236,7 @@ index 5d3c9b2d5c..25df2dcd36 100644
  [[nodiscard]] QJsonObject MessageToJson(not_null<const HistoryItem *> item) {
    const auto peer = item->history()->peer;
    const auto from = item->from();
-@@ -85,12 +251,18 @@ bool g_triedInit = false;
+@@ -85,17 +252,28 @@ bool g_triedInit = false;
  } // namespace
  
  void EnsureInitialized() {
@@ -254,7 +255,17 @@ index 5d3c9b2d5c..25df2dcd36 100644
    if (!g_engine) {
      LOG(("Chatcraft: engine init failed, filtering disabled."));
    }
-@@ -104,6 +276,7 @@ FilterAction FilterMessage(not_null<const HistoryItem *> item) {
+ }
+ 
++bool FilteringAvailable() {
++  EnsureInitialized();
++  return g_engine != nullptr;
++}
++
+ FilterAction FilterMessage(not_null<const HistoryItem *> item) {
+   EnsureInitialized();
+   if (!g_engine) {
+@@ -104,6 +282,7 @@ FilterAction FilterMessage(not_null<const HistoryItem *> item) {
    const auto json =
        QJsonDocument(MessageToJson(item)).toJson(QJsonDocument::Compact);
    char *raw = chatcraft_filter_message(g_engine, json.constData());
@@ -262,7 +273,7 @@ index 5d3c9b2d5c..25df2dcd36 100644
    if (!raw) {
      return FilterAction::Allow;
    }
-@@ -121,11 +294,107 @@ FilterAction FilterMessage(not_null<const HistoryItem *> item) {
+@@ -121,11 +300,140 @@ FilterAction FilterMessage(not_null<const HistoryItem *> item) {
    return FilterAction::Allow;
  }
  
@@ -281,6 +292,35 @@ index 5d3c9b2d5c..25df2dcd36 100644
 +  const auto result = QJsonDocument::fromJson(QByteArray(raw)).object();
 +  return {result.value(u"hide"_q).toBool(),
 +          result.value(u"priority"_q).toInt()};
++}
++
++std::vector<ChatDecision> FilterChats(const QJsonArray &chats) {
++  auto decisions = std::vector<ChatDecision>(chats.size());
++  if (chats.isEmpty()) {
++    return decisions;
++  }
++  EnsureInitialized();
++  if (!g_engine) {
++    return decisions;
++  }
++  const auto json = QJsonDocument(chats).toJson(QJsonDocument::Compact);
++  const auto raw = chatcraft_filter_chats(g_engine, json.constData());
++  ScheduleUiRequests();
++  if (!raw) {
++    return decisions;
++  }
++  const auto guard = gsl::finally([&] { chatcraft_string_free(raw); });
++  const auto document = QJsonDocument::fromJson(QByteArray(raw));
++  if (!document.isArray() || document.array().size() != chats.size()) {
++    return decisions;
++  }
++  const auto results = document.array();
++  for (auto i = 0; i != results.size(); ++i) {
++    const auto result = results[i].toObject();
++    decisions[i] = {result.value(u"hide"_q).toBool(),
++                    result.value(u"priority"_q).toInt()};
++  }
++  return decisions;
 +}
 +
 +QJsonArray Lifecycle(const QString &event) {
@@ -357,8 +397,12 @@ index 5d3c9b2d5c..25df2dcd36 100644
  
 -void EnsureInitialized() {}
 +void EnsureInitialized() { static const auto config = ReadConfig(); }
++bool FilteringAvailable() { return false; }
 +
 +ChatDecision FilterChat(const QJsonObject &) { return {}; }
++std::vector<ChatDecision> FilterChats(const QJsonArray &chats) {
++  return std::vector<ChatDecision>(chats.size());
++}
 +QJsonArray Lifecycle(const QString &) { return {}; }
 +bool IsUiHidden(const QString &, const QString &) { return false; }
 +QJsonArray ScriptsStatus() {
@@ -371,7 +415,7 @@ index 5d3c9b2d5c..25df2dcd36 100644
  
  FilterAction FilterMessage(not_null<const HistoryItem *>) {
    return FilterAction::Allow;
-@@ -135,4 +404,46 @@ bool AdsDisabled() { return false; }
+@@ -135,4 +443,46 @@ bool AdsDisabled() { return false; }
  
  #endif // CHATCRAFT_ENABLED
  
@@ -419,10 +463,10 @@ index 5d3c9b2d5c..25df2dcd36 100644
 +
  } // namespace Chatcraft
 diff --git a/Telegram/SourceFiles/chatcraft/chatcraft_filter.h b/Telegram/SourceFiles/chatcraft/chatcraft_filter.h
-index 0281b27821..fa4ee58223 100644
+index 0281b27821..271999548e 100644
 --- a/Telegram/SourceFiles/chatcraft/chatcraft_filter.h
 +++ b/Telegram/SourceFiles/chatcraft/chatcraft_filter.h
-@@ -2,6 +2,10 @@
+@@ -2,6 +2,12 @@
  // Maintained directly in the Chatcraft Desktop fork.
  #pragma once
  
@@ -430,10 +474,12 @@ index 0281b27821..fa4ee58223 100644
 +#include <QtCore/QJsonObject>
 +#include <QtCore/QString>
 +
++#include <vector>
++
  namespace HistoryView {
  class Element;
  }
-@@ -17,6 +21,7 @@ enum class FilterAction {
+@@ -17,6 +23,7 @@ enum class FilterAction {
    Highlight,
  };
  
@@ -441,10 +487,12 @@ index 0281b27821..fa4ee58223 100644
  // 惰性初始化，首次过滤时自动调用；也可在启动时显式调用。
  // 配置来源：
  //   CHATCRAFT_CONFIG      EngineConfig JSON 字符串
-@@ -25,6 +30,20 @@ enum class FilterAction {
+@@ -24,6 +31,22 @@ enum class FilterAction {
+ //   CHATCRAFT_LUA_SCRIPT  Lua 脚本路径（等价于 config.lua_script）
  //   CHATCRAFT_DISABLE_ADS / CHATCRAFT_ENABLE_ADS 广告开关（Rust 侧读取）
  void EnsureInitialized();
- 
++[[nodiscard]] bool FilteringAvailable();
++
 +// Stable semantic identifiers, independent of translated labels or row order.
 +bool IsUiHidden(const QString &id, const QString &kind);
 +struct ChatDecision {
@@ -453,15 +501,15 @@ index 0281b27821..fa4ee58223 100644
 +};
 +
 +[[nodiscard]] ChatDecision FilterChat(const QJsonObject &chat);
++[[nodiscard]] std::vector<ChatDecision> FilterChats(const QJsonArray &chats);
 +QJsonArray Lifecycle(const QString &event);
 +void ShowLifecycleNotifications(const QString &event);
 +QJsonArray ScriptsStatus();
 +QString ScriptsDirectory();
 +bool ScriptsDirectoryEnabled();
-+
+ 
  // 对一条消息求值。FFI 不可用或出错时返回 Allow（安全降级）。
  FilterAction FilterMessage(not_null<const HistoryItem *> item);
- 
 diff --git a/Telegram/SourceFiles/core/application.cpp b/Telegram/SourceFiles/core/application.cpp
 index 7a309ac843..30defedb64 100644
 --- a/Telegram/SourceFiles/core/application.cpp
@@ -487,11 +535,324 @@ index 7a309ac843..30defedb64 100644
  }
  
  void Application::autoRegisterUrlScheme() {
+diff --git a/Telegram/SourceFiles/dialogs/dialogs_community_requestable_list.cpp b/Telegram/SourceFiles/dialogs/dialogs_community_requestable_list.cpp
+index 44263d853d..d3069d577e 100644
+--- a/Telegram/SourceFiles/dialogs/dialogs_community_requestable_list.cpp
++++ b/Telegram/SourceFiles/dialogs/dialogs_community_requestable_list.cpp
+@@ -7,152 +7,152 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ */
+ #include "dialogs/dialogs_community_requestable_list.h"
+ 
+-#include "boxes/peers/community_box.h"
+ #include "boxes/peer_list_box.h"
++#include "boxes/peers/community_box.h"
+ #include "data/data_channel.h"
+ #include "data/data_community.h"
+ #include "lang/lang_keys.h"
+-#include "main/session/session_show.h"
+ #include "main/main_session.h"
++#include "main/session/session_show.h"
+ #include "ui/qt_object_factory.h"
++#include "ui/ui_utility.h"
+ #include "window/window_session_controller.h"
+ 
++
+ #include "styles/style_dialogs.h"
+ 
+ namespace Dialogs {
+ namespace {
+ 
+-[[nodiscard]] std::unique_ptr<PeerListRow> MakeCommunityChatRow(
+-		not_null<PeerData*> peer) {
+-	auto row = std::make_unique<PeerListRow>(peer);
+-	const auto channel = peer->asChannel();
+-	if (channel && channel->membersCountKnown()) {
+-		row->setCustomStatus((channel->isBroadcast()
+-			? tr::lng_chat_status_subscribers
+-			: tr::lng_chat_status_members)(
+-				tr::now,
+-				lt_count_decimal,
+-				channel->membersCount()));
+-	}
+-	return row;
++[[nodiscard]] std::unique_ptr<PeerListRow>
++MakeCommunityChatRow(not_null<PeerData *> peer) {
++  auto row = std::make_unique<PeerListRow>(peer);
++  const auto channel = peer->asChannel();
++  if (channel && channel->membersCountKnown()) {
++    row->setCustomStatus((channel->isBroadcast()
++                              ? tr::lng_chat_status_subscribers
++                              : tr::lng_chat_status_members)(
++        tr::now, lt_count_decimal, channel->membersCount()));
++  }
++  return row;
+ }
+ 
+ class ChatsController final : public PeerListController {
+ public:
+-	ChatsController(
+-		not_null<Main::Session*> session,
+-		rpl::producer<std::vector<not_null<PeerData*>>> chats,
+-		Fn<void(not_null<PeerData*>)> callback);
++  ChatsController(not_null<Main::Session *> session,
++                  rpl::producer<std::vector<not_null<PeerData *>>> chats,
++                  Fn<void(not_null<PeerData *>)> callback);
+ 
+-	Main::Session &session() const override;
+-	void prepare() override;
+-	void rowClicked(not_null<PeerListRow*> row) override;
++  Main::Session &session() const override;
++  void prepare() override;
++  void rowClicked(not_null<PeerListRow *> row) override;
+ 
+-	[[nodiscard]] rpl::producer<int> countValue() const {
+-		return _count.value();
+-	}
++  [[nodiscard]] rpl::producer<int> countValue() const { return _count.value(); }
+ 
+ private:
+-	const not_null<Main::Session*> _session;
+-	rpl::producer<std::vector<not_null<PeerData*>>> _chats;
+-	Fn<void(not_null<PeerData*>)> _callback;
+-	rpl::variable<int> _count = 0;
+-
++  const not_null<Main::Session *> _session;
++  rpl::producer<std::vector<not_null<PeerData *>>> _chats;
++  Fn<void(not_null<PeerData *>)> _callback;
++  rpl::variable<int> _count = 0;
+ };
+ 
+ ChatsController::ChatsController(
+-	not_null<Main::Session*> session,
+-	rpl::producer<std::vector<not_null<PeerData*>>> chats,
+-	Fn<void(not_null<PeerData*>)> callback)
+-: _session(session)
+-, _chats(std::move(chats))
+-, _callback(std::move(callback)) {
+-	setStyleOverrides(&st::communityRequestableList);
++    not_null<Main::Session *> session,
++    rpl::producer<std::vector<not_null<PeerData *>>> chats,
++    Fn<void(not_null<PeerData *>)> callback)
++    : _session(session), _chats(std::move(chats)),
++      _callback(std::move(callback)) {
++  setStyleOverrides(&st::communityRequestableList);
+ }
+ 
+-Main::Session &ChatsController::session() const {
+-	return *_session;
+-}
++Main::Session &ChatsController::session() const { return *_session; }
+ 
+ void ChatsController::prepare() {
+-	std::move(
+-		_chats
+-	) | rpl::on_next([=](const std::vector<not_null<PeerData*>> &list) {
+-		while (delegate()->peerListFullRowsCount() > 0) {
+-			delegate()->peerListRemoveRow(
+-				delegate()->peerListRowAt(
+-					delegate()->peerListFullRowsCount() - 1));
+-		}
+-		for (const auto &peer : list) {
+-			delegate()->peerListAppendRow(MakeCommunityChatRow(peer));
+-		}
+-		delegate()->peerListRefreshRows();
+-		_count = int(list.size());
+-	}, lifetime());
++  std::move(_chats) |
++      rpl::on_next(
++          [=](const std::vector<not_null<PeerData *>> &list) {
++            while (delegate()->peerListFullRowsCount() > 0) {
++              delegate()->peerListRemoveRow(delegate()->peerListRowAt(
++                  delegate()->peerListFullRowsCount() - 1));
++            }
++            for (const auto &peer : list) {
++              delegate()->peerListAppendRow(MakeCommunityChatRow(peer));
++            }
++            delegate()->peerListRefreshRows();
++            _count = int(list.size());
++          },
++          lifetime());
+ }
+ 
+-void ChatsController::rowClicked(not_null<PeerListRow*> row) {
+-	_callback(row->peer());
++void ChatsController::rowClicked(not_null<PeerListRow *> row) {
++  _callback(row->peer());
+ }
+ 
+ } // namespace
+ 
+ CommunityRequestableList::CommunityRequestableList(
+-	QWidget *parent,
+-	not_null<Window::SessionController*> controller,
+-	not_null<Data::CommunityInfo*> community)
+-: RpWidget(parent)
+-, _controller(controller) {
+-	auto requestable = community->linkedPeersValue(
+-	) | rpl::map([=] {
+-		auto result = std::vector<not_null<PeerData*>>();
+-		for (const auto &linked : community->linkedPeers()) {
+-			if (Data::CommunityChatJoined(linked.peer)) {
+-				continue;
+-			} else if (!linked.peer->isUser()
+-				&& Data::IsCommunityChatViewable(linked)) {
+-				continue;
+-			}
+-			result.push_back(linked.peer);
+-		}
+-		return result;
+-	}) | rpl::start_spawning(lifetime());
+-
+-	const auto openChat = [=](not_null<PeerData*> peer) {
+-		OpenCommunityLinkedPeer(_controller, community, peer);
+-	};
+-
+-	const auto delegate = lifetime().make_state<
+-		PeerListContentDelegateShow
+-	>(controller->uiShow());
+-	const auto chatsController = lifetime().make_state<ChatsController>(
+-		&controller->session(),
+-		rpl::duplicate(requestable),
+-		openChat);
+-	_content = Ui::CreateChild<PeerListContent>(this, chatsController);
+-	delegate->setContent(_content);
+-	chatsController->setDelegate(delegate);
+-
+-	_count = chatsController->countValue();
+-
+-	_content->heightValue(
+-	) | rpl::on_next([=] {
+-		resizeToWidth(width());
+-	}, lifetime());
+-
+-	hide();
++    QWidget *parent, not_null<Window::SessionController *> controller,
++    not_null<Data::CommunityInfo *> community, Filter filter)
++    : RpWidget(parent), _controller(controller) {
++  auto requestable = _refreshRequests.events_starting_with({}) | rpl::map([=] {
++                       auto result = std::vector<not_null<PeerData *>>();
++                       for (const auto &linked : community->linkedPeers()) {
++                         if (Data::CommunityChatJoined(linked.peer)) {
++                           continue;
++                         } else if (!linked.peer->isUser() &&
++                                    Data::IsCommunityChatViewable(linked)) {
++                           continue;
++                         }
++                         result.push_back(linked.peer);
++                       }
++                       return filter(result);
++                     }) |
++                     rpl::start_spawning(lifetime());
++
++  community->linkedPeersValue() | rpl::skip(1) |
++      rpl::on_next([=] { refresh(); }, lifetime());
++
++  const auto openChat = [=](not_null<PeerData *> peer) {
++    OpenCommunityLinkedPeer(_controller, community, peer);
++  };
++
++  const auto delegate =
++      lifetime().make_state<PeerListContentDelegateShow>(controller->uiShow());
++  const auto chatsController = lifetime().make_state<ChatsController>(
++      &controller->session(), rpl::duplicate(requestable), openChat);
++  _content = Ui::CreateChild<PeerListContent>(this, chatsController);
++  delegate->setContent(_content);
++  chatsController->setDelegate(delegate);
++
++  _count = chatsController->countValue();
++
++  _content->heightValue() |
++      rpl::on_next([=] { resizeToWidth(width()); }, lifetime());
++
++  hide();
+ }
+ 
+ CommunityRequestableList::~CommunityRequestableList() = default;
+ 
++void CommunityRequestableList::refresh() {
++  if (_refreshScheduled) {
++    return;
++  }
++  _refreshScheduled = true;
++  Ui::PostponeCall(this, [=] {
++    _refreshScheduled = false;
++    _refreshRequests.fire({});
++  });
++}
++
+ int CommunityRequestableList::resizeGetHeight(int newWidth) {
+-	_content->resizeToWidth(newWidth);
+-	_content->moveToLeft(0, 0);
+-	return _content->height();
++  _content->resizeToWidth(newWidth);
++  _content->moveToLeft(0, 0);
++  return _content->height();
+ }
+ 
+ rpl::producer<int> CommunityRequestableList::countValue() const {
+-	return _count.value();
++  return _count.value();
+ }
+ 
+ } // namespace Dialogs
+diff --git a/Telegram/SourceFiles/dialogs/dialogs_community_requestable_list.h b/Telegram/SourceFiles/dialogs/dialogs_community_requestable_list.h
+index 20184984eb..557b0472c6 100644
+--- a/Telegram/SourceFiles/dialogs/dialogs_community_requestable_list.h
++++ b/Telegram/SourceFiles/dialogs/dialogs_community_requestable_list.h
+@@ -9,6 +9,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ 
+ #include "ui/rp_widget.h"
+ 
++#include <vector>
++
++class PeerData;
+ class PeerListContent;
+ 
+ namespace Data {
+@@ -23,22 +26,27 @@ namespace Dialogs {
+ 
+ class CommunityRequestableList final : public Ui::RpWidget {
+ public:
+-	CommunityRequestableList(
+-		QWidget *parent,
+-		not_null<Window::SessionController*> controller,
+-		not_null<Data::CommunityInfo*> community);
+-	~CommunityRequestableList();
++  using Filter = Fn<std::vector<not_null<PeerData *>>(
++      const std::vector<not_null<PeerData *>> &)>;
++
++  CommunityRequestableList(QWidget *parent,
++                           not_null<Window::SessionController *> controller,
++                           not_null<Data::CommunityInfo *> community,
++                           Filter filter);
++  ~CommunityRequestableList();
+ 
+-	[[nodiscard]] rpl::producer<int> countValue() const;
++  [[nodiscard]] rpl::producer<int> countValue() const;
++  void refresh();
+ 
+ protected:
+-	int resizeGetHeight(int newWidth) override;
++  int resizeGetHeight(int newWidth) override;
+ 
+ private:
+-	const not_null<Window::SessionController*> _controller;
+-	PeerListContent *_content = nullptr;
+-	rpl::variable<int> _count = 0;
+-
++  const not_null<Window::SessionController *> _controller;
++  PeerListContent *_content = nullptr;
++  rpl::variable<int> _count = 0;
++  rpl::event_stream<> _refreshRequests;
++  bool _refreshScheduled = false;
+ };
+ 
+ } // namespace Dialogs
 diff --git a/Telegram/SourceFiles/dialogs/dialogs_inner_widget.cpp b/Telegram/SourceFiles/dialogs/dialogs_inner_widget.cpp
-index 2f0a620c68..60b7f94f43 100644
+index 2f0a620c68..04d7632e54 100644
 --- a/Telegram/SourceFiles/dialogs/dialogs_inner_widget.cpp
 +++ b/Telegram/SourceFiles/dialogs/dialogs_inner_widget.cpp
-@@ -7,101 +7,104 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+@@ -7,99 +7,101 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
  */
  #include "dialogs/dialogs_inner_widget.h"
  
@@ -513,6 +874,7 @@ index 2f0a620c68..60b7f94f43 100644
 -#include "history/history.h"
 -#include "history/history_item.h"
 +#include "api/api_chat_filters.h"
++#include "api/api_peer_search.h"
 +#include "apiwrap.h"
 +#include "base/options.h"
 +#include "base/qt/qt_common_adapters.h"
@@ -646,18 +1008,14 @@ index 2f0a620c68..60b7f94f43 100644
 +#include "window/window_controller.h"
 +#include "window/window_peer_menu.h"
 +#include "window/window_session_controller.h"
-+
  
 -#include <QtWidgets/QApplication>
  #include <QtCore/QMimeData>
 +#include <QtWidgets/QApplication>
  #include <unordered_map>
  
-+
  namespace Dialogs {
- namespace {
- 
-@@ -114,7129 +117,6752 @@ constexpr auto kQueryPreviewLimit = 32;
+@@ -114,7129 +116,6883 @@ constexpr auto kQueryPreviewLimit = 32;
  constexpr auto kPreviewPostsLimit = 3;
  
  [[nodiscard]] uint64 RowsCacheKey(Entry *entry) {
@@ -1320,12 +1678,16 @@ index 2f0a620c68..60b7f94f43 100644
 +      }) {
 +  session().data().chatListEntryRefreshes() |
 +      rpl::on_next([=] { scheduleChatcraftRefresh(); }, lifetime());
++  rpl::merge(session().data().chatsListChanges(),
++             session().data().chatsListLoadedEvents()) |
++      rpl::on_next([=] { scheduleChatcraftRefresh(); }, lifetime());
 +  session().changes().historyUpdates(Data::HistoryUpdate::Flag::UnreadView |
 +                                     Data::HistoryUpdate::Flag::IsPinned |
 +                                     Data::HistoryUpdate::Flag::Folder) |
 +      rpl::on_next([=] { scheduleChatcraftRefresh(); }, lifetime());
-+  session().changes().peerUpdates(Data::PeerUpdate::Flag::Name |
-+                                  Data::PeerUpdate::Flag::Notifications) |
++  session().changes().peerUpdates(
++      Data::PeerUpdate::Flag::Name | Data::PeerUpdate::Flag::Notifications |
++      Data::PeerUpdate::Flag::FullInfo | Data::PeerUpdate::Flag::IsContact) |
 +      rpl::on_next([=] { scheduleChatcraftRefresh(); }, lifetime());
 +  setAttribute(Qt::WA_OpaquePaintEvent, true);
 +  setAccessibleName(tr::lng_recent_chats(tr::now));
@@ -1411,6 +1773,7 @@ index 2f0a620c68..60b7f94f43 100644
 +      }) |
 +      rpl::on_next(
 +          [=] {
++            _chatcraftDirty = true;
 +            if (_state == WidgetState::Filtered && !_filter.isEmpty()) {
 +              refreshFilterResults();
 +            }
@@ -1427,6 +1790,7 @@ index 2f0a620c68..60b7f94f43 100644
 +                 rpl::map_to(true)) |
 +      rpl::on_next(
 +          [=](bool refreshHeight) {
++            scheduleChatcraftRefresh();
 +            if (refreshHeight) {
 +              _chatsFilterTags.clear();
 +              _shownList->updateHeights(_narrowRatio);
@@ -2088,7 +2452,12 @@ index 2f0a620c68..60b7f94f43 100644
 +  _openedForumLifetime.destroy();
 +  if (forum) {
 +    rpl::merge(forum->chatsListChanges(), forum->chatsListLoadedEvents()) |
-+        rpl::on_next([=] { refresh(); }, _openedForumLifetime);
++        rpl::on_next(
++            [=] {
++              _chatcraftDirty = true;
++              refresh();
++            },
++            _openedForumLifetime);
 +  }
 +
 +  refreshWithCollapsedRows(true);
@@ -2131,6 +2500,7 @@ index 2f0a620c68..60b7f94f43 100644
 +    return;
 +  }
 +  const auto owner = &session().data();
++  auto keys = std::vector<Key>();
 +  for (const auto &linked : _openedCommunity->linkedPeers()) {
 +    if (linked.peer->isUser()) {
 +      continue;
@@ -2142,8 +2512,11 @@ index 2f0a620c68..60b7f94f43 100644
 +      continue;
 +    }
 +    if (Data::IsCommunityChatViewable(linked)) {
-+      _communityViewable.add(history, _narrowRatio);
++      keys.push_back(history);
 +    }
++  }
++  for (const auto key : filterChatcraftKeys(keys)) {
++    _communityViewable.add(key.history(), _narrowRatio);
 +  }
 +  _communityViewable.finalize();
  }
@@ -2219,8 +2592,21 @@ index 2f0a620c68..60b7f94f43 100644
 +  _communityRequestableList.destroy();
 +  _communityRequestableCount = 0;
 +  if (community) {
-+    _communityRequestableList =
-+        object_ptr<CommunityRequestableList>(this, _controller, community);
++    _communityRequestableList = object_ptr<CommunityRequestableList>(
++        this, _controller, community,
++        [=](const std::vector<not_null<PeerData *>> &peers) {
++          auto keys = std::vector<Key>();
++          keys.reserve(peers.size());
++          for (const auto peer : peers) {
++            keys.push_back(session().data().history(peer));
++          }
++          auto result = std::vector<not_null<PeerData *>>();
++          result.reserve(peers.size());
++          for (const auto key : filterChatcraftKeys(keys)) {
++            result.push_back(key.history()->peer);
++          }
++          return result;
++        });
 +    _communityRequestableList->countValue() | rpl::on_next(
 +                                                  [=](int count) {
 +                                                    _communityRequestableCount =
@@ -2234,13 +2620,15 @@ index 2f0a620c68..60b7f94f43 100644
 +
 +    community->linkedPeersValue() | rpl::on_next(
 +                                        [=] {
++                                          _chatcraftDirty = true;
++                                          refreshShownList();
 +                                          rebuildCommunitySections();
 +                                          refresh();
 +                                        },
 +                                        _openedCommunityLifetime);
 +
-+    community->refreshed() |
-+        rpl::on_next([=] { update(); }, _openedCommunityLifetime);
++    community->refreshed() | rpl::on_next([=] { scheduleChatcraftRefresh(); },
++                                          _openedCommunityLifetime);
 +  } else {
 +    rebuildCommunitySections();
 +  }
@@ -6603,6 +6991,7 @@ index 2f0a620c68..60b7f94f43 100644
 +}
 +
 +void InnerWidget::dialogRowReplaced(Row *oldRow, Row *newRow) {
++  _chatcraftSource = nullptr;
 +  scheduleChatcraftRefresh();
 +  if (oldRow) {
 +    invalidateCachedRow(RowsCacheKey(oldRow->entry()));
@@ -7613,15 +8002,97 @@ index 2f0a620c68..60b7f94f43 100644
 +}
 +
 +void InnerWidget::scheduleChatcraftRefresh() {
++  _chatcraftDirty = true;
 +  if (_chatcraftRefreshScheduled) {
 +    return;
 +  }
 +  _chatcraftRefreshScheduled = true;
 +  Ui::PostponeCall(crl::guard(this, [=] {
 +    _chatcraftRefreshScheduled = false;
++    if (_state == WidgetState::Filtered) {
++      clearSelection();
++      clearPressed();
++      if (_chatcraftPeerSearch &&
++          _chatcraftPeerSearch->query.toLower().trimmed() == _peerSearchQuery) {
++        peerSearchReceived(*_chatcraftPeerSearch);
++      } else {
++        refreshFilterResults();
++      }
++    }
++    refreshShownList();
++    if (communityModeShown()) {
++      rebuildCommunitySections();
++    }
 +    refresh();
 +    update();
 +  }));
++}
++
++std::vector<Key>
++InnerWidget::filterChatcraftKeys(const std::vector<Key> &keys) {
++  if (keys.empty() || !Chatcraft::FilteringAvailable()) {
++    return keys;
++  }
++  auto chats = QJsonArray();
++  for (const auto key : keys) {
++    const auto history = key.history();
++    if (!history) {
++      continue;
++    }
++    auto folders = QJsonArray();
++    for (const auto &filter : session().data().chatsFilters().list()) {
++      if (filter.id() && filter.contains(history)) {
++        folders.append(int(filter.id()));
++      }
++    }
++    const auto peer = history->peer;
++    const auto channel = peer->asChannel();
++    const auto type =
++        channel ? (channel->isMegagroup() ? u"supergroup"_q : u"channel"_q)
++        : peer->isChat() ? u"group"_q
++                         : u"private"_q;
++    chats.append(QJsonObject{
++        {u"chat_id"_q, qint64(peer->id.value)},
++        {u"chat_type"_q, type},
++        {u"title"_q, peer->name()},
++        {u"folder_ids"_q, folders},
++        {u"folder_count"_q, int(folders.size())},
++        {u"folder_id"_q, _filterId ? int(_filterId) : (_openedFolder ? -1 : 0)},
++        {u"unread"_q, history->unreadCount() > 0 || history->unreadMark()},
++        {u"unread_count"_q, history->unreadCount()},
++        {u"muted"_q, history->muted()},
++        {u"pinned"_q, history->isPinnedDialog(_filterId)},
++    });
++  }
++  if (chats.isEmpty()) {
++    return keys;
++  }
++  const auto outcomes = Chatcraft::FilterChats(chats);
++  auto decisions = std::vector<std::pair<Key, int>>();
++  auto index = 0;
++  for (const auto key : keys) {
++    if (!key.history()) {
++      decisions.emplace_back(key, 0);
++    } else {
++      const auto decision = outcomes[index++];
++      if (!decision.hide) {
++        decisions.emplace_back(key, decision.priority);
++      }
++    }
++  }
++  std::stable_sort(decisions.begin(), decisions.end(),
++                   [](const auto &a, const auto &b) {
++                     if (!a.first.history() || !b.first.history()) {
++                       return bool(b.first.history()) && !a.first.history();
++                     }
++                     return a.second > b.second;
++                   });
++  auto result = std::vector<Key>();
++  result.reserve(decisions.size());
++  for (const auto &decision : decisions) {
++    result.push_back(decision.first);
++  }
++  return result;
  }
  
  void InnerWidget::refreshShownList() {
@@ -7647,61 +8118,28 @@ index 2f0a620c68..60b7f94f43 100644
 +      : _filterId
 +          ? session().data().chatsFilters().chatsList(_filterId)->indexed()
 +          : session().data().chatsList(_openedFolder)->indexed();
-+  auto keys = std::vector<Key>();
-+  auto nativeKeys = std::vector<Key>();
-+  if (!_savedSublists && !_openedForum && !_openedCommunity) {
-+    auto decisions = std::vector<std::pair<Key, int>>();
-+    for (const auto row : *list) {
-+      const auto key = row->key();
-+      nativeKeys.push_back(key);
-+      const auto history = key.history();
-+      if (!history) {
-+        decisions.emplace_back(key, 0);
-+        continue;
-+      }
-+      auto folders = QJsonArray();
-+      for (const auto &filter : session().data().chatsFilters().list()) {
-+        if (filter.id() && filter.contains(history)) {
-+          folders.append(int(filter.id()));
-+        }
-+      }
-+      const auto peer = history->peer;
-+      const auto channel = peer->asChannel();
-+      const auto type =
-+          channel ? (channel->isMegagroup() ? u"supergroup"_q : u"channel"_q)
-+          : peer->isChat() ? u"group"_q
-+                           : u"private"_q;
-+      const auto decision = Chatcraft::FilterChat(QJsonObject{
-+          {u"chat_id"_q, qint64(peer->id.value)},
-+          {u"chat_type"_q, type},
-+          {u"title"_q, peer->name()},
-+          {u"folder_ids"_q, folders},
-+          {u"folder_count"_q, int(folders.size())},
-+          {u"folder_id"_q,
-+           _filterId ? int(_filterId) : (_openedFolder ? -1 : 0)},
-+          {u"unread"_q, history->unreadCount() > 0 || history->unreadMark()},
-+          {u"unread_count"_q, history->unreadCount()},
-+          {u"muted"_q, history->muted()},
-+          {u"pinned"_q, history->isPinnedDialog(_filterId)},
-+      });
-+      if (!decision.hide) {
-+        decisions.emplace_back(key, decision.priority);
-+      }
-+    }
-+    std::stable_sort(decisions.begin(), decisions.end(),
-+                     [](const auto &a, const auto &b) {
-+                       if (!a.first.history() || !b.first.history()) {
-+                         return bool(b.first.history()) && !a.first.history();
-+                       }
-+                       return a.second > b.second;
-+                     });
-+    for (const auto &decision : decisions) {
-+      keys.push_back(decision.first);
-+    }
++  if (!_chatcraftDirty && _chatcraftSource == list &&
++      _chatcraftProjectionFilterId == _filterId &&
++      _chatcraftFolder == _openedFolder) {
++    return;
 +  }
++  const auto contextChanged = _chatcraftSource != list ||
++                              _chatcraftProjectionFilterId != _filterId ||
++                              _chatcraftFolder != _openedFolder;
++  _chatcraftDirty = false;
++  _chatcraftSource = list;
++  _chatcraftFolder = _openedFolder;
++  _chatcraftProjectionFilterId = _filterId;
++  if (_communityRequestableList) {
++    _communityRequestableList->refresh();
++  }
++  auto nativeKeys = std::vector<Key>();
++  for (const auto row : *list) {
++    nativeKeys.push_back(row->key());
++  }
++  const auto keys = filterChatcraftKeys(nativeKeys);
 +  if (keys != nativeKeys) {
-+    if (!_chatcraftProjection || keys != _chatcraftKeys ||
-+        _chatcraftProjectionFilterId != _filterId) {
++    if (!_chatcraftProjection || keys != _chatcraftKeys || contextChanged) {
 +      clearSelection();
 +      clearPressed();
 +      _qdragging = nullptr;
@@ -7714,7 +8152,7 @@ index 2f0a620c68..60b7f94f43 100644
 +        _chatcraftProjection->addToEnd(key);
 +      }
 +      _chatcraftKeys = keys;
-+      _chatcraftProjectionFilterId = _filterId;
++      _activeSubItemsRow = nullptr;
 +    }
 +    _chatcraftProjection->updateHeights(_narrowRatio);
 +    list = _chatcraftProjection.get();
@@ -7725,6 +8163,7 @@ index 2f0a620c68..60b7f94f43 100644
 +    stopReorderPinned();
 +    unfreezeShownList(false);
 +    _shownList = list;
++    _activeSubItemsRow = nullptr;
 +    _chatcraftProjection = nullptr;
 +    _chatcraftKeys.clear();
 +  }
@@ -8742,6 +9181,25 @@ index 2f0a620c68..60b7f94f43 100644
 +      _filterResults.back().row->recountHeight(_narrowRatio, _filterId);
 +    }
 +  }
++  filterChatcraftSearchResults();
++}
++
++void InnerWidget::filterChatcraftSearchResults() {
++  auto keys = std::vector<Key>();
++  auto rows = base::flat_map<Key, not_null<Row *>>();
++  for (const auto &result : _filterResults) {
++    keys.push_back(result.key());
++    rows.emplace(result.key(), result.row);
++  }
++  const auto filtered = filterChatcraftKeys(keys);
++  _filterResults.clear();
++  auto top = 0;
++  for (const auto key : filtered) {
++    const auto row = rows.find(key)->second;
++    _filterResults.emplace_back(row);
++    _filterResults.back().top = top;
++    top += row->height();
++  }
  }
  
  void InnerWidget::appendToFiltered(Key key) {
@@ -8769,6 +9227,7 @@ index 2f0a620c68..60b7f94f43 100644
 +  _filterResults.emplace_back(i->second.get());
 +  _filterResults.back().top = height;
 +  trackResultsHistory(key.owningHistory());
++  filterChatcraftSearchResults();
  }
  
  InnerWidget::~InnerWidget() {
@@ -8805,6 +9264,7 @@ index 2f0a620c68..60b7f94f43 100644
 -		}
 -	}
 -	_peerSearchResults.clear();
++  _chatcraftPeerSearch = nullptr;
 +  if (_pressedRightButtonData) {
 +    for (const auto &result : _peerSearchResults) {
 +      if (result->sponsored &&
@@ -9551,9 +10011,29 @@ index 2f0a620c68..60b7f94f43 100644
 +
 +  _peerSearchQuery = result.query.toLower().trimmed();
 +  clearPeerSearchResults();
++  _chatcraftPeerSearch = std::make_unique<Api::PeerSearchResult>(result);
 +  _peerSearchResults.reserve(result.peers.size() + result.sponsored.size());
 +  for (const auto &peer : result.my) {
-+    appendToFiltered(peer->owner().history(peer));
++    const auto key = Key(peer->owner().history(peer));
++    if (!_filterResultsGlobal.contains(key)) {
++      auto row = std::make_unique<Row>(key, 0, 0);
++      row->recountHeight(_narrowRatio, _filterId);
++      _filterResultsGlobal.emplace(key, std::move(row));
++      trackResultsHistory(key.owningHistory());
++    }
++  }
++  refreshFilterResults();
++  auto candidates = std::vector<Key>();
++  for (const auto &sponsored : result.sponsored) {
++    candidates.push_back(sponsored.peer->owner().history(sponsored.peer));
++  }
++  for (const auto peer : result.peers) {
++    candidates.push_back(peer->owner().history(peer));
++  }
++  const auto visible = filterChatcraftKeys(candidates);
++  auto ranks = base::flat_map<Key, int>();
++  for (const auto key : visible) {
++    ranks.emplace(key, int(ranks.size()));
 +  }
 +  const auto inlist = [&](not_null<PeerData *> peer) {
 +    if (const auto history = peer->owner().historyLoaded(peer)) {
@@ -9565,7 +10045,8 @@ index 2f0a620c68..60b7f94f43 100644
 +  auto added = base::flat_set<not_null<PeerData *>>();
 +  for (const auto &sponsored : result.sponsored) {
 +    const auto peer = sponsored.peer;
-+    if (inlist(peer) || _sponsoredRemoved.contains(peer)) {
++    if (inlist(peer) || _sponsoredRemoved.contains(peer) ||
++        !ranks.contains(Key(peer->owner().history(peer)))) {
 +      continue;
 +    }
 +    _peerSearchResults.push_back(std::make_unique<PeerSearchResult>(peer));
@@ -9576,11 +10057,19 @@ index 2f0a620c68..60b7f94f43 100644
 +    added.emplace(peer);
 +  }
 +  for (const auto &peer : result.peers) {
-+    if (added.contains(peer) || inlist(peer)) {
++    if (added.contains(peer) || inlist(peer) ||
++        !ranks.contains(Key(peer->owner().history(peer)))) {
 +      continue;
 +    }
 +    _peerSearchResults.push_back(std::make_unique<PeerSearchResult>(peer));
 +  }
++  std::stable_sort(_peerSearchResults.begin(), _peerSearchResults.end(),
++                   [&](const auto &a, const auto &b) {
++                     const auto left = Key(a->peer->owner().history(a->peer));
++                     const auto right = Key(b->peer->owner().history(b->peer));
++                     return ranks.find(left)->second <
++                            ranks.find(right)->second;
++                   });
 +  refresh();
 +}
 +
@@ -13959,28 +14448,1460 @@ index 2f0a620c68..60b7f94f43 100644
  
  } // namespace Dialogs
 diff --git a/Telegram/SourceFiles/dialogs/dialogs_inner_widget.h b/Telegram/SourceFiles/dialogs/dialogs_inner_widget.h
-index f88c0353bc..d613d9b8f6 100644
+index f88c0353bc..80174d3bf6 100644
 --- a/Telegram/SourceFiles/dialogs/dialogs_inner_widget.h
 +++ b/Telegram/SourceFiles/dialogs/dialogs_inner_widget.h
-@@ -468,6 +468,7 @@ private:
- 	void fillSupportSearchMenu(not_null<Ui::PopupMenu*> menu);
+@@ -11,13 +11,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "base/object_ptr.h"
+ #include "base/timer.h"
+ #include "data/data_messages.h"
+-#include "dialogs/ui/dialogs_quick_action_context.h"
+ #include "dialogs/dialogs_community_rows_view.h"
+ #include "dialogs/dialogs_inner_widget_accessibility.h"
+ #include "dialogs/dialogs_key.h"
++#include "dialogs/ui/dialogs_quick_action_context.h"
+ #include "lang/lang_keys.h"
+-#include "ui/effects/animations.h"
+ #include "ui/dragging_scroll_manager.h"
++#include "ui/effects/animations.h"
+ #include "ui/rows_scroll_cache.h"
+ #include "ui/rp_widget.h"
+ #include "ui/userpic_view.h"
+@@ -91,739 +91,689 @@ struct RightButton;
+ enum class ChatTypeFilter : uchar;
  
- 	void refreshShownList();
-+	void scheduleChatcraftRefresh();
- 	void rebuildCommunitySections();
- 	void updateCommunityRequestableGeometry();
- 	void setCommunityPressed(int pressed);
-@@ -642,6 +643,10 @@ private:
- 	const not_null<Window::SessionController*> _controller;
+ struct ChosenRow {
+-	Key key;
+-	Data::MessagePosition message;
+-	MsgId topicJumpRootId;
+-	PeerId sublistJumpPeerId;
+-	QByteArray sponsoredRandomId;
+-	bool userpicClick : 1 = false;
+-	bool communityBadgeClick : 1 = false;
+-	bool filteredRow : 1 = false;
+-	bool newWindow : 1 = false;
++  Key key;
++  Data::MessagePosition message;
++  MsgId topicJumpRootId;
++  PeerId sublistJumpPeerId;
++  QByteArray sponsoredRandomId;
++  bool userpicClick : 1 = false;
++  bool communityBadgeClick : 1 = false;
++  bool filteredRow : 1 = false;
++  bool newWindow : 1 = false;
+ };
  
- 	not_null<IndexedList*> _shownList;
-+	std::unique_ptr<IndexedList> _chatcraftProjection;
-+	std::vector<Key> _chatcraftKeys;
-+	FilterId _chatcraftProjectionFilterId = 0;
-+	bool _chatcraftRefreshScheduled = false;
- 	FilterId _filterId = 0;
- 	bool _mouseSelection = false;
- 	std::optional<QPoint> _lastMousePosition;
+ struct SearchRequestType {
+-	bool migrated : 1 = false;
+-	bool posts : 1 = false;
+-	bool start : 1 = false;
+-	bool peer : 1 = false;
+-
+-	friend inline constexpr auto operator<=>(
+-		SearchRequestType a,
+-		SearchRequestType b) = default;
+-	friend inline constexpr bool operator==(
+-		SearchRequestType a,
+-		SearchRequestType b) = default;
++  bool migrated : 1 = false;
++  bool posts : 1 = false;
++  bool start : 1 = false;
++  bool peer : 1 = false;
++
++  friend inline constexpr auto operator<=>(SearchRequestType a,
++                                           SearchRequestType b) = default;
++  friend inline constexpr bool operator==(SearchRequestType a,
++                                          SearchRequestType b) = default;
+ };
+ 
+ enum class SearchRequestDelay : uchar {
+-	InCache,
+-	Instant,
+-	Delayed,
++  InCache,
++  Instant,
++  Delayed,
+ };
+ 
+ enum class WidgetState {
+-	Default,
+-	Filtered,
++  Default,
++  Filtered,
+ };
+ 
+ class InnerWidget final : public Ui::RpWidget {
+ public:
+-	using ChatsFilterTagsKey = int64;
+-
+-	struct ChildListShown {
+-		PeerId peerId = 0;
+-		float64 shown = 0.;
+-	};
+-	InnerWidget(
+-		QWidget *parent,
+-		not_null<Window::SessionController*> controller,
+-		rpl::producer<ChildListShown> childListShown);
+-
+-	void searchReceived(
+-		std::vector<not_null<HistoryItem*>> result,
+-		HistoryItem *inject,
+-		SearchRequestType type,
+-		int fullCount);
+-	void peerSearchReceived(Api::PeerSearchResult result);
+-
+-	[[nodiscard]] FilterId filterId() const;
+-	void switchToFilter(FilterId filterId);
+-
+-	void clearSelection();
+-
+-	void changeOpenedFolder(Data::Folder *folder);
+-	void changeOpenedForum(Data::Forum *forum);
+-	void changeOpenedCommunity(Data::CommunityInfo *community);
+-	void showSavedSublists();
+-	void selectSkip(int32 direction);
+-	void selectSkipPage(int32 pixels, int32 direction);
+-
+-	void dragLeft();
+-	void setNarrowRatio(float64 narrowRatio);
+-
+-	void clearFilter();
+-	void refresh(bool toTop = false);
+-	void refreshEmpty();
+-	void resizeEmpty();
+-
+-	void showPeerMenu();
+-
+-	[[nodiscard]] bool isUserpicPress() const;
+-	[[nodiscard]] bool isUserpicPressOnWide() const;
+-	[[nodiscard]] bool isCommunityBadgePressOnNarrow() const;
+-	void cancelChatPreview();
+-	bool scheduleChatPreview(QPoint positionOverride);
+-	bool showChatPreview();
+-	void chatPreviewShown(bool shown, RowDescriptor row = {});
+-	bool chooseRow(
+-		Qt::KeyboardModifiers modifiers = {},
+-		MsgId pressedTopicRootId = {},
+-		PeerId pressedSublistPeerId = {});
+-	bool processKeyDispatch(QKeyEvent *e);
+-
+-	void scrollToEntry(const RowDescriptor &entry);
+-
+-	[[nodiscard]] Data::Folder *shownFolder() const;
+-	[[nodiscard]] Data::Forum *shownForum() const;
+-	[[nodiscard]] Data::CommunityInfo *shownCommunity() const;
+-
+-	[[nodiscard]] WidgetState state() const;
+-	[[nodiscard]] not_null<const style::DialogRow*> st() const {
+-		return _st;
+-	}
+-	[[nodiscard]] bool hasFilteredResults() const;
+-
+-	void searchRequested(bool loading);
+-	void applySearchState(SearchState state);
+-	[[nodiscard]] auto searchTagsChanges() const
+-		-> rpl::producer<std::vector<Data::ReactionId>>;
+-
+-	void onHashtagFilterUpdate(QStringView newFilter);
+-	void appendToFiltered(Key key);
+-
+-	Data::Thread *updateFromParentDrag(QPoint globalPosition);
+-
+-	void setLoadMoreCallback(Fn<void()> callback);
+-	void setLoadMoreFilteredCallback(Fn<void()> callback);
+-	[[nodiscard]] rpl::producer<> listBottomReached() const;
+-	[[nodiscard]] auto changeSearchTabRequests() const
+-		-> rpl::producer<ChatSearchTab>;
+-	[[nodiscard]] auto changeSearchFilterRequests() const
+-		-> rpl::producer<ChatTypeFilter>;
+-	[[nodiscard]] rpl::producer<bool> changeSearchFromArchiveRequests() const;
+-	[[nodiscard]] rpl::producer<> resetSearchRestrictionsRequests() const;
+-	[[nodiscard]] rpl::producer<> cancelSearchRequests() const;
+-	[[nodiscard]] rpl::producer<> cancelSearchFromRequests() const;
+-	[[nodiscard]] rpl::producer<> changeSearchFromRequests() const;
+-	[[nodiscard]] rpl::producer<ChosenRow> chosenRow() const;
+-	[[nodiscard]] rpl::producer<> updated() const;
+-
+-	[[nodiscard]] rpl::producer<int> scrollByDeltaRequests() const;
+-	[[nodiscard]] rpl::producer<Ui::ScrollToRequest> mustScrollTo() const;
+-	[[nodiscard]] rpl::producer<Ui::ScrollToRequest> dialogMoved() const;
+-	[[nodiscard]] rpl::producer<SearchRequestDelay> searchRequests() const;
+-	[[nodiscard]] rpl::producer<QString> completeHashtagRequests() const;
+-	[[nodiscard]] rpl::producer<> refreshHashtagsRequests() const;
+-
+-	[[nodiscard]] RowDescriptor resolveChatNext(RowDescriptor from = {}) const;
+-	[[nodiscard]] RowDescriptor resolveChatPrevious(RowDescriptor from = {}) const;
+-
+-	~InnerWidget();
+-
+-	void parentGeometryChanged();
+-
+-	bool processTouchEvent(not_null<QTouchEvent*> e);
+-	[[nodiscard]] rpl::producer<> touchCancelRequests() const {
+-		return _touchCancelRequests.events();
+-	}
+-
+-	[[nodiscard]] rpl::producer<UserId> openBotMainAppRequests() const;
+-
+-	void setSwipeContextData(
+-		int64 key,
+-		std::optional<Ui::Controls::SwipeContextData> data);
+-	[[nodiscard]] int64 calcSwipeKey(int top);
+-	bool prepareQuickAction(int64 key, Dialogs::Ui::QuickDialogAction);
+-	void clearQuickActions();
+-
+-	Qt::FocusPolicy accessibilityFocusPolicy() override {
+-		return Qt::TabFocus;
+-	}
+-	QAccessible::Role accessibilityRole() override {
+-		return QAccessible::Role::List;
+-	}
+-	Ui::AccessibilityState accessibilityState() const override;
+-	int accessibilityChildCount() const override;
+-	QString accessibilityChildName(int index) const override;
+-	QAccessible::State accessibilityChildState(int index) const override;
+-	QAccessible::Role accessibilityChildRole() const override;
+-	QRect accessibilityChildRect(int index) const override;
+-	int accessibilityChildColumnCount(int row) const override;
+-	QAccessible::Role accessibilityChildSubItemRole() const override;
+-	QString accessibilityChildSubItemName(int row, int column) const override;
+-	QString accessibilityChildSubItemValue(int row, int column) const override;
+-	bool accessibilityChildSupportsActions(int index) const override;
+-	quintptr accessibilityChildIdentity(int index) const override;
+-	int accessibilityChildIndexByIdentity(quintptr identity) const override;
+-	void accessibilityChildSetFocus(quintptr identity) override;
+-	void accessibilityChildActivate(quintptr identity) override;
++  using ChatsFilterTagsKey = int64;
++
++  struct ChildListShown {
++    PeerId peerId = 0;
++    float64 shown = 0.;
++  };
++  InnerWidget(QWidget *parent, not_null<Window::SessionController *> controller,
++              rpl::producer<ChildListShown> childListShown);
++
++  void searchReceived(std::vector<not_null<HistoryItem *>> result,
++                      HistoryItem *inject, SearchRequestType type,
++                      int fullCount);
++  void peerSearchReceived(Api::PeerSearchResult result);
++
++  [[nodiscard]] FilterId filterId() const;
++  void switchToFilter(FilterId filterId);
++
++  void clearSelection();
++
++  void changeOpenedFolder(Data::Folder *folder);
++  void changeOpenedForum(Data::Forum *forum);
++  void changeOpenedCommunity(Data::CommunityInfo *community);
++  void showSavedSublists();
++  void selectSkip(int32 direction);
++  void selectSkipPage(int32 pixels, int32 direction);
++
++  void dragLeft();
++  void setNarrowRatio(float64 narrowRatio);
++
++  void clearFilter();
++  void refresh(bool toTop = false);
++  void refreshEmpty();
++  void resizeEmpty();
++
++  void showPeerMenu();
++
++  [[nodiscard]] bool isUserpicPress() const;
++  [[nodiscard]] bool isUserpicPressOnWide() const;
++  [[nodiscard]] bool isCommunityBadgePressOnNarrow() const;
++  void cancelChatPreview();
++  bool scheduleChatPreview(QPoint positionOverride);
++  bool showChatPreview();
++  void chatPreviewShown(bool shown, RowDescriptor row = {});
++  bool chooseRow(Qt::KeyboardModifiers modifiers = {},
++                 MsgId pressedTopicRootId = {},
++                 PeerId pressedSublistPeerId = {});
++  bool processKeyDispatch(QKeyEvent *e);
++
++  void scrollToEntry(const RowDescriptor &entry);
++
++  [[nodiscard]] Data::Folder *shownFolder() const;
++  [[nodiscard]] Data::Forum *shownForum() const;
++  [[nodiscard]] Data::CommunityInfo *shownCommunity() const;
++
++  [[nodiscard]] WidgetState state() const;
++  [[nodiscard]] not_null<const style::DialogRow *> st() const { return _st; }
++  [[nodiscard]] bool hasFilteredResults() const;
++
++  void searchRequested(bool loading);
++  void applySearchState(SearchState state);
++  [[nodiscard]] auto searchTagsChanges() const
++      -> rpl::producer<std::vector<Data::ReactionId>>;
++
++  void onHashtagFilterUpdate(QStringView newFilter);
++  void appendToFiltered(Key key);
++
++  Data::Thread *updateFromParentDrag(QPoint globalPosition);
++
++  void setLoadMoreCallback(Fn<void()> callback);
++  void setLoadMoreFilteredCallback(Fn<void()> callback);
++  [[nodiscard]] rpl::producer<> listBottomReached() const;
++  [[nodiscard]] auto changeSearchTabRequests() const
++      -> rpl::producer<ChatSearchTab>;
++  [[nodiscard]] auto changeSearchFilterRequests() const
++      -> rpl::producer<ChatTypeFilter>;
++  [[nodiscard]] rpl::producer<bool> changeSearchFromArchiveRequests() const;
++  [[nodiscard]] rpl::producer<> resetSearchRestrictionsRequests() const;
++  [[nodiscard]] rpl::producer<> cancelSearchRequests() const;
++  [[nodiscard]] rpl::producer<> cancelSearchFromRequests() const;
++  [[nodiscard]] rpl::producer<> changeSearchFromRequests() const;
++  [[nodiscard]] rpl::producer<ChosenRow> chosenRow() const;
++  [[nodiscard]] rpl::producer<> updated() const;
++
++  [[nodiscard]] rpl::producer<int> scrollByDeltaRequests() const;
++  [[nodiscard]] rpl::producer<Ui::ScrollToRequest> mustScrollTo() const;
++  [[nodiscard]] rpl::producer<Ui::ScrollToRequest> dialogMoved() const;
++  [[nodiscard]] rpl::producer<SearchRequestDelay> searchRequests() const;
++  [[nodiscard]] rpl::producer<QString> completeHashtagRequests() const;
++  [[nodiscard]] rpl::producer<> refreshHashtagsRequests() const;
++
++  [[nodiscard]] RowDescriptor resolveChatNext(RowDescriptor from = {}) const;
++  [[nodiscard]] RowDescriptor
++  resolveChatPrevious(RowDescriptor from = {}) const;
++
++  ~InnerWidget();
++
++  void parentGeometryChanged();
++
++  bool processTouchEvent(not_null<QTouchEvent *> e);
++  [[nodiscard]] rpl::producer<> touchCancelRequests() const {
++    return _touchCancelRequests.events();
++  }
++
++  [[nodiscard]] rpl::producer<UserId> openBotMainAppRequests() const;
++
++  void setSwipeContextData(int64 key,
++                           std::optional<Ui::Controls::SwipeContextData> data);
++  [[nodiscard]] int64 calcSwipeKey(int top);
++  bool prepareQuickAction(int64 key, Dialogs::Ui::QuickDialogAction);
++  void clearQuickActions();
++
++  Qt::FocusPolicy accessibilityFocusPolicy() override { return Qt::TabFocus; }
++  QAccessible::Role accessibilityRole() override {
++    return QAccessible::Role::List;
++  }
++  Ui::AccessibilityState accessibilityState() const override;
++  int accessibilityChildCount() const override;
++  QString accessibilityChildName(int index) const override;
++  QAccessible::State accessibilityChildState(int index) const override;
++  QAccessible::Role accessibilityChildRole() const override;
++  QRect accessibilityChildRect(int index) const override;
++  int accessibilityChildColumnCount(int row) const override;
++  QAccessible::Role accessibilityChildSubItemRole() const override;
++  QString accessibilityChildSubItemName(int row, int column) const override;
++  QString accessibilityChildSubItemValue(int row, int column) const override;
++  bool accessibilityChildSupportsActions(int index) const override;
++  quintptr accessibilityChildIdentity(int index) const override;
++  int accessibilityChildIndexByIdentity(quintptr identity) const override;
++  void accessibilityChildSetFocus(quintptr identity) override;
++  void accessibilityChildActivate(quintptr identity) override;
+ 
+ protected:
+-	void visibleTopBottomUpdated(
+-		int visibleTop,
+-		int visibleBottom) override;
+-
+-	void paintEvent(QPaintEvent *e) override;
+-	void mouseMoveEvent(QMouseEvent *e) override;
+-	void mousePressEvent(QMouseEvent *e) override;
+-	void mouseReleaseEvent(QMouseEvent *e) override;
+-	void resizeEvent(QResizeEvent *e) override;
+-	void enterEventHook(QEnterEvent *e) override;
+-	void leaveEventHook(QEvent *e) override;
+-	void contextMenuEvent(QContextMenuEvent *e) override;
+-	void focusInEvent(QFocusEvent *e) override;
+-	void keyPressEvent(QKeyEvent *e) override;
++  void visibleTopBottomUpdated(int visibleTop, int visibleBottom) override;
++
++  void paintEvent(QPaintEvent *e) override;
++  void mouseMoveEvent(QMouseEvent *e) override;
++  void mousePressEvent(QMouseEvent *e) override;
++  void mouseReleaseEvent(QMouseEvent *e) override;
++  void resizeEvent(QResizeEvent *e) override;
++  void enterEventHook(QEnterEvent *e) override;
++  void leaveEventHook(QEvent *e) override;
++  void contextMenuEvent(QContextMenuEvent *e) override;
++  void focusInEvent(QFocusEvent *e) override;
++  void keyPressEvent(QKeyEvent *e) override;
+ 
+ private:
+-	struct CollapsedRow;
+-	struct HashtagResult;
+-	struct SponsoredSearchResult;
+-	struct PeerSearchResult;
+-	struct TagCache;
+-
+-	enum class JumpSkip {
+-		PreviousOrBegin,
+-		NextOrEnd,
+-		PreviousOrOriginal,
+-		NextOrOriginal,
+-	};
+-
+-	enum class EmptyState : uchar {
+-		None,
+-		Loading,
+-		NoContacts,
+-		EmptyFolder,
+-		EmptyForum,
+-		EmptySavedSublists,
+-	};
+-
+-	struct PinnedRow {
+-		anim::value yadd;
+-		crl::time animStartTime = 0;
+-	};
+-
+-	struct CachedRow {
+-		QRect preview;
+-		QRect badge;
+-		QImage band;
+-		std::pair<uint64, uint64> userpic;
+-		bool bandDirty = true;
+-		bool video = false;
+-	};
+-
+-	struct FilterResult {
+-		FilterResult(not_null<Row*> row) : row(row) {
+-		}
+-
+-		not_null<Row*> row;
+-		int top = 0;
+-
+-		[[nodiscard]] Key key() const;
+-		[[nodiscard]] int bottom() const;
+-	};
+-
+-	Main::Session &session() const;
+-
+-	void dialogRowReplaced(Row *oldRow, Row *newRow);
+-
+-	void setState(WidgetState state);
+-	void editOpenedFilter();
+-	void repaintCollapsedFolderRow(not_null<Data::Folder*> folder);
+-	void refreshWithCollapsedRows(bool toTop = false);
+-	bool needCollapsedRowsRefresh() const;
+-	bool chooseCollapsedRow(Qt::KeyboardModifiers modifiers);
+-	bool chooseHashtag();
+-	ChosenRow computeChosenRow() const;
+-	bool isRowActive(not_null<Row*> row, const RowDescriptor &entry) const;
+-	bool isSearchResultActive(
+-		not_null<FakeRow*> result,
+-		const RowDescriptor &entry) const;
+-
+-	void repaintDialogRow(FilterId filterId, not_null<Row*> row);
+-	void repaintDialogRow(RowDescriptor row);
+-	void refreshDialogRow(RowDescriptor row);
+-	bool updateEntryHeight(not_null<Entry*> entry);
+-	void showSponsoredMenu(int peerSearchIndex, QPoint globalPos);
+-
+-	void clearMouseSelection(bool clearSelection = false);
+-	void deselectAllRows();
+-	void mousePressReleased(
+-		QPoint globalPosition,
+-		Qt::MouseButton button,
+-		Qt::KeyboardModifiers modifiers);
+-	void processGlobalForceClick(QPoint globalPosition);
+-	void clearIrrelevantState();
+-	void selectByMouse(QPoint globalPosition);
+-	void preloadRowsData();
+-	void scrollToItem(int top, int height);
+-	void scrollToDefaultSelected();
+-	void scrollToFilteredSelected();
+-	bool selectChildByIndex(int index);
+-	void clearSecondaryMouseState();
+-	void setCollapsedPressed(int pressed);
+-	void setPressed(
+-		Row *pressed,
+-		bool pressedTopicJump,
+-		bool pressedRightButton);
+-	void clearPressed();
+-	void setHashtagPressed(int pressed);
+-	void setFilteredPressed(
+-		int pressed,
+-		bool pressedTopicJump,
+-		bool pressedRightButton);
+-	void setPeerSearchPressed(int pressed, bool pressedRightButton);
+-	void setPreviewPressed(int pressed);
+-	void setSearchedPressed(int pressed);
+-	bool isPressed() const {
+-		return (_collapsedPressed >= 0)
+-			|| _pressed
+-			|| (_hashtagPressed >= 0)
+-			|| (_filteredPressed >= 0)
+-			|| (_peerSearchPressed >= 0)
+-			|| (_previewPressed >= 0)
+-			|| (_searchedPressed >= 0)
+-			|| (_communityPressed >= 0)
+-			|| _pressedMorePosts
+-			|| _pressedChatTypeFilter;
+-	}
+-	bool isSelected() const {
+-		return (_collapsedSelected >= 0)
+-			|| _selected
+-			|| (_hashtagSelected >= 0)
+-			|| (_filteredSelected >= 0)
+-			|| (_peerSearchSelected >= 0)
+-			|| (_previewSelected >= 0)
+-			|| (_searchedSelected >= 0)
+-			|| (_communitySelected >= 0)
+-			|| _selectedMorePosts
+-			|| _selectedChatTypeFilter;
+-	}
+-	bool uniqueSearchResults() const;
+-	bool hasHistoryInResults(not_null<History*> history) const;
+-
+-	int defaultRowTop(not_null<Row*> row) const;
+-	void setupOnlineStatusCheck();
+-	void jumpToTop();
+-
+-	void updateRowCornerStatusShown(not_null<History*> history);
+-	void repaintDialogRowCornerStatus(not_null<History*> history);
+-
+-	[[nodiscard]] bool animatedPreviewCached(not_null<Row*> row);
+-	void invalidateCachedRow(uint64 rowId);
+-	void invalidateLoadedUserpics();
+-	void paintCachedRowOverlays(
+-		Painter &p,
+-		not_null<Row*> row,
+-		uint64 rowId,
+-		const Ui::PaintContext &context);
+-	void paintAnimatedPreview(
+-		Painter &p,
+-		not_null<Ui::MessageView*> view,
+-		CachedRow &cached,
+-		const Ui::PaintContext &context);
+-
+-	bool addBotAppRipple(QPoint origin, Fn<void()> updateCallback);
+-	bool addQuickActionRipple(not_null<Row*> row, Fn<void()> updateCallback);
+-
+-	bool addRightButtonRipple(QPoint origin, Fn<void()> updateCallback);
+-
+-	void setupShortcuts();
+-	RowDescriptor computeJump(
+-		const RowDescriptor &to,
+-		JumpSkip skip) const;
+-	bool jumpToDialogRow(RowDescriptor to);
+-
+-	RowDescriptor chatListEntryBefore(const RowDescriptor &which) const;
+-	RowDescriptor chatListEntryAfter(const RowDescriptor &which) const;
+-	RowDescriptor chatListEntryFirst() const;
+-	RowDescriptor chatListEntryLast() const;
+-
+-	void itemRemoved(not_null<const HistoryItem*> item);
+-	enum class UpdateRowSection {
+-		Default       = (1 << 0),
+-		Filtered      = (1 << 1),
+-		PeerSearch    = (1 << 2),
+-		MessageSearch = (1 << 3),
+-		All           = Default | Filtered | PeerSearch | MessageSearch,
+-	};
+-	using UpdateRowSections = base::flags<UpdateRowSection>;
+-	friend inline constexpr auto is_flag_type(UpdateRowSection) { return true; };
+-
+-	void updateSearchResult(not_null<PeerData*> peer);
+-	void updateDialogRow(
+-		RowDescriptor row,
+-		QRect updateRect = QRect(),
+-		UpdateRowSections sections = UpdateRowSection::All);
+-	void fillSupportSearchMenu(not_null<Ui::PopupMenu*> menu);
+-
+-	void refreshShownList();
+-	void rebuildCommunitySections();
+-	void updateCommunityRequestableGeometry();
+-	void setCommunityPressed(int pressed);
+-	[[nodiscard]] int skipTopHeight() const;
+-	[[nodiscard]] int collapsedRowsOffset() const;
+-	[[nodiscard]] int dialogsOffset() const;
+-	[[nodiscard]] int shownHeight(int till = -1) const;
+-	[[nodiscard]] int fixedOnTopCount() const;
+-	[[nodiscard]] int pinnedOffset() const;
+-	[[nodiscard]] int filteredOffset() const;
+-	[[nodiscard]] int filteredIndex(int y) const;
+-	[[nodiscard]] int filteredHeight(int till = -1) const;
+-	[[nodiscard]] int peerSearchOffset() const;
+-	[[nodiscard]] int searchInChatOffset() const;
+-	[[nodiscard]] int previewOffset() const;
+-	[[nodiscard]] int searchedOffset() const;
+-	[[nodiscard]] int searchInChatSkip() const;
+-	[[nodiscard]] int hashtagsOffset() const;
+-	[[nodiscard]] int communityViewableTop() const;
+-	[[nodiscard]] int communityRequestableTop() const;
+-	[[nodiscard]] int communitySectionsBottom() const;
+-	[[nodiscard]] int communityRowCount() const;
+-	[[nodiscard]] Row *communityRowAt(int index) const;
+-	[[nodiscard]] int communityRowAbsoluteTop(int index) const;
+-	[[nodiscard]] bool communityModeShown() const;
+-
+-	void paintCollapsedRows(
+-		Painter &p,
+-		QRect clip) const;
+-	void paintCollapsedRow(
+-		Painter &p,
+-		not_null<const CollapsedRow*> row,
+-		bool selected) const;
+-	void paintPeerSearchResult(
+-		Painter &p,
+-		not_null<const PeerSearchResult*> result,
+-		const Ui::PaintContext &context);
+-	void paintSearchTags(
+-		Painter &p,
+-		const Ui::PaintContext &context) const;
+-	//void paintSearchInChat(
+-	//	Painter &p,
+-	//	const Ui::PaintContext &context) const;
+-	//void paintSearchInPeer(
+-	//	Painter &p,
+-	//	not_null<PeerData*> peer,
+-	//	Ui::PeerUserpicView &userpic,
+-	//	int top,
+-	//	const Ui::Text::String &text) const;
+-	//void paintSearchInSaved(
+-	//	Painter &p,
+-	//	int top,
+-	//	const Ui::Text::String &text) const;
+-	//void paintSearchInReplies(
+-	//	Painter &p,
+-	//	int top,
+-	//	const Ui::Text::String &text) const;
+-	//void paintSearchInTopic(
+-	//	Painter &p,
+-	//	const Ui::PaintContext &context,
+-	//	not_null<Data::ForumTopic*> topic,
+-	//	Ui::PeerUserpicView &userpic,
+-	//	int top,
+-	//	const Ui::Text::String &text) const;
+-	//template <typename PaintUserpic>
+-	//void paintSearchInFilter(
+-	//	Painter &p,
+-	//	PaintUserpic paintUserpic,
+-	//	int top,
+-	//	const style::icon *icon,
+-	//	const Ui::Text::String &text) const;
+-	[[nodiscard]] bool archiveSearchActive() const;
+-	[[nodiscard]] bool communitySearchActive() const;
+-	void updateSearchIn();
+-	void repaintSearchResult(int index);
+-	void repaintPreviewResult(int index);
+-
+-	[[nodiscard]] bool computeSearchWithPostsPreview() const;
+-
+-	Ui::VideoUserpic *validateVideoUserpic(not_null<Row*> row);
+-	Ui::VideoUserpic *validateVideoUserpic(not_null<History*> history);
+-
+-	Row *shownRowByKey(Key key);
+-	[[nodiscard]] const std::vector<SubItem> &activeSubItems(
+-		not_null<const Row*> row) const;
+-	enum class AccessibilityCohort {
+-		Hashtag,
+-		Filtered,
+-		PeerSearch,
+-		Preview,
+-		Searched,
+-	};
+-	struct FilteredChildRef {
+-		AccessibilityCohort cohort;
+-		int local = 0;
+-	};
+-	[[nodiscard]] int filteredChildCount() const;
+-	[[nodiscard]] std::optional<FilteredChildRef>
+-		filteredChildAt(int index) const;
+-
+-	// A single logical mapping for the Default state shared by painting order,
+-	// keyboard navigation and accessibility: collapsed rows first, then the
+-	// shown list with _skipTopDialog applied. `collapsed` indexes
+-	// _collapsedRows; otherwise `row` is the shown-list row.
+-	struct DefaultChildRef {
+-		int collapsed = -1;
+-		Row *row = nullptr;
+-	};
+-	[[nodiscard]] int defaultChildCount() const;
+-	[[nodiscard]] std::optional<DefaultChildRef>
+-		defaultChildAt(int index) const;
+-	[[nodiscard]] int defaultChildIndexOfSelected() const;
+-
+-	void announceSelectedFocus();
+-	void refreshFilterResults();
+-	void clearSearchResults(bool alsoPeerSearchResults = true);
+-	void clearPeerSearchResults();
+-	void clearPreviewResults();
+-	void updateSelectedRow(Key key = Key());
+-	void trackResultsHistory(not_null<History*> history);
+-
+-	[[nodiscard]] QBrush currentBg() const;
+-	[[nodiscard]] RowDescriptor computeChatPreviewRow() const;
+-
+-	[[nodiscard]] const std::vector<Key> &pinnedChatsOrder() const;
+-	void checkReorderPinnedStart(QPoint localPosition);
+-	void startReorderPinned(QPoint localPosition);
+-	int updateReorderIndexGetCount();
+-	bool updateReorderPinned(QPoint localPosition);
+-	[[nodiscard]] bool skipChatsListFreeze() const;
+-	void unfreezeShownList(bool updateIfWasFrozen);
+-	void finishReorderPinned();
+-	bool finishReorderOnRelease();
+-	void stopReorderPinned();
+-	int countPinnedIndex(Row *ofRow);
+-	void savePinnedOrder();
+-	bool pinnedShiftAnimationCallback(crl::time now);
+-	void handleChatListEntryRefreshes();
+-	void moveSearchIn();
+-	void dragPinnedFromTouch();
+-	[[nodiscard]] bool hasChatTypeFilter() const;
+-
+-	void restoreScrollShowingCommunity(
+-		not_null<Data::CommunityInfo*> community);
+-	void saveChatsFilterScrollState(FilterId filterId);
+-	bool restoreChatsFilterScrollState(FilterId filterId);
+-
+-	[[nodiscard]] not_null<Ui::QuickActionContext*> ensureQuickAction(
+-		int64 key);
+-	void deactivateQuickAction();
+-	void updateQuickActionRow(int64 key);
+-
+-	[[nodiscard]] bool lookupIsInBotAppButton(
+-		Row *row,
+-		QPoint localPosition);
+-	[[nodiscard]] bool lookupIsInRightButton(
+-		const RightButton &button,
+-		QPoint localPosition);
+-	[[nodiscard]] RightButton *maybeCacheRightButton(Row *row);
+-	void fillRightButton(
+-		RightButton &button,
+-		const TextWithEntities &text,
+-		const style::DialogRightButton &st);
+-
+-	[[nodiscard]] QImage *cacheChatsFilterTag(
+-		const Data::ChatFilter &filter,
+-		uint8 more,
+-		bool active);
+-
+-	void performDrag();
+-
+-	const not_null<Window::SessionController*> _controller;
+-
+-	not_null<IndexedList*> _shownList;
+-	FilterId _filterId = 0;
+-	bool _mouseSelection = false;
+-	std::optional<QPoint> _lastMousePosition;
+-	int _lastRowLocalMouseX = -1;
+-	Qt::MouseButton _pressButton = Qt::LeftButton;
+-
+-	Data::Folder *_openedFolder = nullptr;
+-	Data::Forum *_openedForum = nullptr;
+-	rpl::lifetime _openedForumLifetime;
+-	Data::CommunityInfo *_openedCommunity = nullptr;
+-
+-	std::vector<std::unique_ptr<CollapsedRow>> _collapsedRows;
+-	not_null<const style::DialogRow*> _st;
+-	mutable std::unique_ptr<Ui::TopicJumpCache> _topicJumpCache;
+-	base::flat_map<uint64, CachedRow> _cachedRows;
+-	Ui::RowsScrollCache _rowsScrollCache{[this] {
+-		_cachedRows.clear();
+-		update();
+-	}};
+-	bool _selectedChatTypeFilter = false;
+-	bool _pressedChatTypeFilter = false;
+-	bool _selectedMorePosts = false;
+-	bool _pressedMorePosts = false;
+-	int _collapsedSelected = -1;
+-	int _collapsedPressed = -1;
+-	bool _skipTopDialog = false;
+-	Row *_selected = nullptr;
+-	Row *_pressed = nullptr;
+-	MsgId _pressedTopicJumpRootId;
+-	PeerId _pressedSublistJumpPeerId;
+-	bool _selectedTopicJump = false;
+-	bool _pressedTopicJump = false;
+-
+-	RightButton *_pressedRightButtonData = nullptr;
+-	bool _pressedRightButtonSponsored = false;
+-	bool _selectedRightButton = false;
+-	bool _pressedRightButton = false;
+-
+-	Row *_qdragging = nullptr;
+-
+-	Row *_dragging = nullptr;
+-	int _draggingIndex = -1;
+-	int _aboveIndex = -1;
+-	QPoint _dragStart;
+-	std::vector<PinnedRow> _pinnedRows;
+-	Ui::Animations::Basic _pinnedShiftAnimation;
+-	base::flat_set<Key> _pinnedOnDragStart;
+-
+-	mutable const Row *_activeSubItemsRow = nullptr;
+-	mutable std::vector<SubItem> _activeSubItems;
+-
+-	// Remember the last currently dragged row top shift for updating area.
+-	int _aboveTopShift = -1;
+-	int _narrowWidth = 0;
+-
+-	int _visibleTop = 0;
+-	int _visibleBottom = 0;
+-	QString _filter, _hashtagFilter;
+-
+-	std::vector<std::unique_ptr<HashtagResult>> _hashtagResults;
+-	int _hashtagSelected = -1;
+-	int _hashtagPressed = -1;
+-	bool _hashtagDeleteSelected = false;
+-	bool _hashtagDeletePressed = false;
+-
+-	std::vector<FilterResult> _filterResults;
+-	base::flat_map<Key, std::unique_ptr<Row>> _filterResultsGlobal;
+-	int _filteredSelected = -1;
+-	int _filteredPressed = -1;
+-
+-	EmptyState _emptyState = EmptyState::None;
+-
+-	base::flat_set<not_null<History*>> _trackedHistories;
+-	rpl::lifetime _trackedLifetime;
+-
+-	QString _peerSearchQuery;
+-	base::flat_set<not_null<PeerData*>> _sponsoredRemoved;
+-	std::vector<std::unique_ptr<PeerSearchResult>> _peerSearchResults;
+-	int _peerSearchSelected = -1;
+-	int _peerSearchPressed = -1;
+-	int _peerSearchMenu = -1;
+-
+-	std::vector<std::unique_ptr<FakeRow>> _previewResults;
+-	int _previewCount = 0;
+-	int _previewSelected = -1;
+-	int _previewPressed = -1;
+-	int _morePostsWidth = 0;
+-	int _chatTypeFilterWidth = 0;
+-
+-	std::vector<std::unique_ptr<FakeRow>> _searchResults;
+-	int _searchedCount = 0;
+-	int _searchedMigratedCount = 0;
+-	int _searchedSelected = -1;
+-	int _searchedPressed = -1;
+-
+-	CommunityRowsView _communityViewable;
+-	object_ptr<CommunityRequestableList> _communityRequestableList
+-		= { nullptr };
+-	int _communitySelected = -1;
+-	int _communityPressed = -1;
+-	int _communityRequestableCount = 0;
+-	rpl::lifetime _openedCommunityLifetime;
+-
+-	WidgetState _state = WidgetState::Default;
+-
+-	std::unique_ptr<ChatSearchIn> _searchIn;
+-	rpl::event_stream<ChatSearchTab> _changeSearchTabRequests;
+-	rpl::event_stream<ChatTypeFilter> _changeSearchFilterRequests;
+-	rpl::event_stream<bool> _changeSearchFromArchiveRequests;
+-	rpl::event_stream<> _resetSearchRestrictionsRequests;
+-	rpl::event_stream<> _cancelSearchRequests;
+-	rpl::event_stream<> _cancelSearchFromRequests;
+-	rpl::event_stream<> _changeSearchFromRequests;
+-	object_ptr<Ui::RpWidget> _loadingAnimation = { nullptr };
+-	object_ptr<SearchEmpty> _searchEmpty = { nullptr };
+-	SearchState _searchEmptyState;
+-	object_ptr<Ui::FlatLabel> _empty = { nullptr };
+-	object_ptr<Ui::VerticalLayout> _emptyList = { nullptr };
+-	object_ptr<Ui::RoundButton> _emptyButton = { nullptr };
+-
+-	Ui::DraggingScrollManager _draggingScroll;
+-
+-	SearchState _searchState;
+-	HashOrCashtag _searchHashOrCashtag = {};
+-	bool _searchWithPostsPreview = false;
+-	History *_searchInMigrated = nullptr;
+-	PeerData *_searchFromShown = nullptr;
+-	Ui::Text::String _searchFromUserText;
+-	std::unique_ptr<SearchTags> _searchTags;
+-	int _searchTagsLeft = 0;
+-	RowDescriptor _menuRow;
+-
+-	base::flat_map<
+-		not_null<PeerData*>,
+-		std::unique_ptr<Ui::VideoUserpic>> _videoUserpics;
+-
+-	base::flat_map<FilterId, int> _chatsFilterScrollStates;
+-	int _communityScrollTop = 0;
+-
+-	std::unordered_map<ChatsFilterTagsKey, TagCache> _chatsFilterTags;
+-	bool _waitingAllChatListEntryRefreshesForTags = false;
+-	rpl::lifetime _handleChatListEntryTagRefreshesLifetime;
+-
+-	std::unordered_map<PeerId, RightButton> _rightButtons;
+-
+-	Fn<void()> _loadMoreCallback;
+-	Fn<void()> _loadMoreFilteredCallback;
+-	rpl::event_stream<> _listBottomReached;
+-	rpl::event_stream<ChosenRow> _chosenRow;
+-	rpl::event_stream<> _updated;
+-
+-	rpl::event_stream<Ui::ScrollToRequest> _mustScrollTo;
+-	rpl::event_stream<Ui::ScrollToRequest> _dialogMoved;
+-	rpl::event_stream<SearchRequestDelay> _searchRequests;
+-	rpl::event_stream<QString> _completeHashtagRequests;
+-	rpl::event_stream<> _refreshHashtagsRequests;
+-	rpl::event_stream<UserId> _openBotMainAppRequests;
+-
+-	using QuickActionPtr = std::unique_ptr<Ui::QuickActionContext>;
+-	QuickActionPtr _activeQuickAction;
+-	std::vector<QuickActionPtr> _inactiveQuickActions;
+-
+-	RowDescriptor _chatPreviewRow;
+-	bool _chatPreviewScheduled = false;
+-	std::optional<QPoint> _chatPreviewTouchGlobal;
+-	base::Timer _touchDragPinnedTimer;
+-	std::optional<QPoint> _touchDragStartGlobal;
+-	std::optional<QPoint> _touchDragNowGlobal;
+-	rpl::event_stream<> _touchCancelRequests;
+-
+-	rpl::variable<ChildListShown> _childListShown;
+-	base::Timer _freezeTimer;
+-	float64 _narrowRatio = 0.;
+-	bool _geometryInited = false;
+-
+-	Data::SavedMessages *_savedSublists = nullptr;
+-
+-	bool _searchLoading = false;
+-	bool _searchWaiting = false;
+-
+-	base::unique_qptr<Ui::PopupMenu> _menu;
+-
++  struct CollapsedRow;
++  struct HashtagResult;
++  struct SponsoredSearchResult;
++  struct PeerSearchResult;
++  struct TagCache;
++
++  enum class JumpSkip {
++    PreviousOrBegin,
++    NextOrEnd,
++    PreviousOrOriginal,
++    NextOrOriginal,
++  };
++
++  enum class EmptyState : uchar {
++    None,
++    Loading,
++    NoContacts,
++    EmptyFolder,
++    EmptyForum,
++    EmptySavedSublists,
++  };
++
++  struct PinnedRow {
++    anim::value yadd;
++    crl::time animStartTime = 0;
++  };
++
++  struct CachedRow {
++    QRect preview;
++    QRect badge;
++    QImage band;
++    std::pair<uint64, uint64> userpic;
++    bool bandDirty = true;
++    bool video = false;
++  };
++
++  struct FilterResult {
++    FilterResult(not_null<Row *> row) : row(row) {}
++
++    not_null<Row *> row;
++    int top = 0;
++
++    [[nodiscard]] Key key() const;
++    [[nodiscard]] int bottom() const;
++  };
++
++  Main::Session &session() const;
++
++  void dialogRowReplaced(Row *oldRow, Row *newRow);
++
++  void setState(WidgetState state);
++  void editOpenedFilter();
++  void repaintCollapsedFolderRow(not_null<Data::Folder *> folder);
++  void refreshWithCollapsedRows(bool toTop = false);
++  bool needCollapsedRowsRefresh() const;
++  bool chooseCollapsedRow(Qt::KeyboardModifiers modifiers);
++  bool chooseHashtag();
++  ChosenRow computeChosenRow() const;
++  bool isRowActive(not_null<Row *> row, const RowDescriptor &entry) const;
++  bool isSearchResultActive(not_null<FakeRow *> result,
++                            const RowDescriptor &entry) const;
++
++  void repaintDialogRow(FilterId filterId, not_null<Row *> row);
++  void repaintDialogRow(RowDescriptor row);
++  void refreshDialogRow(RowDescriptor row);
++  bool updateEntryHeight(not_null<Entry *> entry);
++  void showSponsoredMenu(int peerSearchIndex, QPoint globalPos);
++
++  void clearMouseSelection(bool clearSelection = false);
++  void deselectAllRows();
++  void mousePressReleased(QPoint globalPosition, Qt::MouseButton button,
++                          Qt::KeyboardModifiers modifiers);
++  void processGlobalForceClick(QPoint globalPosition);
++  void clearIrrelevantState();
++  void selectByMouse(QPoint globalPosition);
++  void preloadRowsData();
++  void scrollToItem(int top, int height);
++  void scrollToDefaultSelected();
++  void scrollToFilteredSelected();
++  bool selectChildByIndex(int index);
++  void clearSecondaryMouseState();
++  void setCollapsedPressed(int pressed);
++  void setPressed(Row *pressed, bool pressedTopicJump, bool pressedRightButton);
++  void clearPressed();
++  void setHashtagPressed(int pressed);
++  void setFilteredPressed(int pressed, bool pressedTopicJump,
++                          bool pressedRightButton);
++  void setPeerSearchPressed(int pressed, bool pressedRightButton);
++  void setPreviewPressed(int pressed);
++  void setSearchedPressed(int pressed);
++  bool isPressed() const {
++    return (_collapsedPressed >= 0) || _pressed || (_hashtagPressed >= 0) ||
++           (_filteredPressed >= 0) || (_peerSearchPressed >= 0) ||
++           (_previewPressed >= 0) || (_searchedPressed >= 0) ||
++           (_communityPressed >= 0) || _pressedMorePosts ||
++           _pressedChatTypeFilter;
++  }
++  bool isSelected() const {
++    return (_collapsedSelected >= 0) || _selected || (_hashtagSelected >= 0) ||
++           (_filteredSelected >= 0) || (_peerSearchSelected >= 0) ||
++           (_previewSelected >= 0) || (_searchedSelected >= 0) ||
++           (_communitySelected >= 0) || _selectedMorePosts ||
++           _selectedChatTypeFilter;
++  }
++  bool uniqueSearchResults() const;
++  bool hasHistoryInResults(not_null<History *> history) const;
++
++  int defaultRowTop(not_null<Row *> row) const;
++  void setupOnlineStatusCheck();
++  void jumpToTop();
++
++  void updateRowCornerStatusShown(not_null<History *> history);
++  void repaintDialogRowCornerStatus(not_null<History *> history);
++
++  [[nodiscard]] bool animatedPreviewCached(not_null<Row *> row);
++  void invalidateCachedRow(uint64 rowId);
++  void invalidateLoadedUserpics();
++  void paintCachedRowOverlays(Painter &p, not_null<Row *> row, uint64 rowId,
++                              const Ui::PaintContext &context);
++  void paintAnimatedPreview(Painter &p, not_null<Ui::MessageView *> view,
++                            CachedRow &cached, const Ui::PaintContext &context);
++
++  bool addBotAppRipple(QPoint origin, Fn<void()> updateCallback);
++  bool addQuickActionRipple(not_null<Row *> row, Fn<void()> updateCallback);
++
++  bool addRightButtonRipple(QPoint origin, Fn<void()> updateCallback);
++
++  void setupShortcuts();
++  RowDescriptor computeJump(const RowDescriptor &to, JumpSkip skip) const;
++  bool jumpToDialogRow(RowDescriptor to);
++
++  RowDescriptor chatListEntryBefore(const RowDescriptor &which) const;
++  RowDescriptor chatListEntryAfter(const RowDescriptor &which) const;
++  RowDescriptor chatListEntryFirst() const;
++  RowDescriptor chatListEntryLast() const;
++
++  void itemRemoved(not_null<const HistoryItem *> item);
++  enum class UpdateRowSection {
++    Default = (1 << 0),
++    Filtered = (1 << 1),
++    PeerSearch = (1 << 2),
++    MessageSearch = (1 << 3),
++    All = Default | Filtered | PeerSearch | MessageSearch,
++  };
++  using UpdateRowSections = base::flags<UpdateRowSection>;
++  friend inline constexpr auto is_flag_type(UpdateRowSection) { return true; };
++
++  void updateSearchResult(not_null<PeerData *> peer);
++  void updateDialogRow(RowDescriptor row, QRect updateRect = QRect(),
++                       UpdateRowSections sections = UpdateRowSection::All);
++  void fillSupportSearchMenu(not_null<Ui::PopupMenu *> menu);
++
++  void refreshShownList();
++  void scheduleChatcraftRefresh();
++  void filterChatcraftSearchResults();
++  [[nodiscard]] std::vector<Key>
++  filterChatcraftKeys(const std::vector<Key> &keys);
++  void rebuildCommunitySections();
++  void updateCommunityRequestableGeometry();
++  void setCommunityPressed(int pressed);
++  [[nodiscard]] int skipTopHeight() const;
++  [[nodiscard]] int collapsedRowsOffset() const;
++  [[nodiscard]] int dialogsOffset() const;
++  [[nodiscard]] int shownHeight(int till = -1) const;
++  [[nodiscard]] int fixedOnTopCount() const;
++  [[nodiscard]] int pinnedOffset() const;
++  [[nodiscard]] int filteredOffset() const;
++  [[nodiscard]] int filteredIndex(int y) const;
++  [[nodiscard]] int filteredHeight(int till = -1) const;
++  [[nodiscard]] int peerSearchOffset() const;
++  [[nodiscard]] int searchInChatOffset() const;
++  [[nodiscard]] int previewOffset() const;
++  [[nodiscard]] int searchedOffset() const;
++  [[nodiscard]] int searchInChatSkip() const;
++  [[nodiscard]] int hashtagsOffset() const;
++  [[nodiscard]] int communityViewableTop() const;
++  [[nodiscard]] int communityRequestableTop() const;
++  [[nodiscard]] int communitySectionsBottom() const;
++  [[nodiscard]] int communityRowCount() const;
++  [[nodiscard]] Row *communityRowAt(int index) const;
++  [[nodiscard]] int communityRowAbsoluteTop(int index) const;
++  [[nodiscard]] bool communityModeShown() const;
++
++  void paintCollapsedRows(Painter &p, QRect clip) const;
++  void paintCollapsedRow(Painter &p, not_null<const CollapsedRow *> row,
++                         bool selected) const;
++  void paintPeerSearchResult(Painter &p,
++                             not_null<const PeerSearchResult *> result,
++                             const Ui::PaintContext &context);
++  void paintSearchTags(Painter &p, const Ui::PaintContext &context) const;
++  // void paintSearchInChat(
++  //	Painter &p,
++  //	const Ui::PaintContext &context) const;
++  // void paintSearchInPeer(
++  //	Painter &p,
++  //	not_null<PeerData*> peer,
++  //	Ui::PeerUserpicView &userpic,
++  //	int top,
++  //	const Ui::Text::String &text) const;
++  // void paintSearchInSaved(
++  //	Painter &p,
++  //	int top,
++  //	const Ui::Text::String &text) const;
++  // void paintSearchInReplies(
++  //	Painter &p,
++  //	int top,
++  //	const Ui::Text::String &text) const;
++  // void paintSearchInTopic(
++  //	Painter &p,
++  //	const Ui::PaintContext &context,
++  //	not_null<Data::ForumTopic*> topic,
++  //	Ui::PeerUserpicView &userpic,
++  //	int top,
++  //	const Ui::Text::String &text) const;
++  // template <typename PaintUserpic>
++  // void paintSearchInFilter(
++  //	Painter &p,
++  //	PaintUserpic paintUserpic,
++  //	int top,
++  //	const style::icon *icon,
++  //	const Ui::Text::String &text) const;
++  [[nodiscard]] bool archiveSearchActive() const;
++  [[nodiscard]] bool communitySearchActive() const;
++  void updateSearchIn();
++  void repaintSearchResult(int index);
++  void repaintPreviewResult(int index);
++
++  [[nodiscard]] bool computeSearchWithPostsPreview() const;
++
++  Ui::VideoUserpic *validateVideoUserpic(not_null<Row *> row);
++  Ui::VideoUserpic *validateVideoUserpic(not_null<History *> history);
++
++  Row *shownRowByKey(Key key);
++  [[nodiscard]] const std::vector<SubItem> &
++  activeSubItems(not_null<const Row *> row) const;
++  enum class AccessibilityCohort {
++    Hashtag,
++    Filtered,
++    PeerSearch,
++    Preview,
++    Searched,
++  };
++  struct FilteredChildRef {
++    AccessibilityCohort cohort;
++    int local = 0;
++  };
++  [[nodiscard]] int filteredChildCount() const;
++  [[nodiscard]] std::optional<FilteredChildRef>
++  filteredChildAt(int index) const;
++
++  // A single logical mapping for the Default state shared by painting order,
++  // keyboard navigation and accessibility: collapsed rows first, then the
++  // shown list with _skipTopDialog applied. `collapsed` indexes
++  // _collapsedRows; otherwise `row` is the shown-list row.
++  struct DefaultChildRef {
++    int collapsed = -1;
++    Row *row = nullptr;
++  };
++  [[nodiscard]] int defaultChildCount() const;
++  [[nodiscard]] std::optional<DefaultChildRef> defaultChildAt(int index) const;
++  [[nodiscard]] int defaultChildIndexOfSelected() const;
++
++  void announceSelectedFocus();
++  void refreshFilterResults();
++  void clearSearchResults(bool alsoPeerSearchResults = true);
++  void clearPeerSearchResults();
++  void clearPreviewResults();
++  void updateSelectedRow(Key key = Key());
++  void trackResultsHistory(not_null<History *> history);
++
++  [[nodiscard]] QBrush currentBg() const;
++  [[nodiscard]] RowDescriptor computeChatPreviewRow() const;
++
++  [[nodiscard]] const std::vector<Key> &pinnedChatsOrder() const;
++  void checkReorderPinnedStart(QPoint localPosition);
++  void startReorderPinned(QPoint localPosition);
++  int updateReorderIndexGetCount();
++  bool updateReorderPinned(QPoint localPosition);
++  [[nodiscard]] bool skipChatsListFreeze() const;
++  void unfreezeShownList(bool updateIfWasFrozen);
++  void finishReorderPinned();
++  bool finishReorderOnRelease();
++  void stopReorderPinned();
++  int countPinnedIndex(Row *ofRow);
++  void savePinnedOrder();
++  bool pinnedShiftAnimationCallback(crl::time now);
++  void handleChatListEntryRefreshes();
++  void moveSearchIn();
++  void dragPinnedFromTouch();
++  [[nodiscard]] bool hasChatTypeFilter() const;
++
++  void restoreScrollShowingCommunity(not_null<Data::CommunityInfo *> community);
++  void saveChatsFilterScrollState(FilterId filterId);
++  bool restoreChatsFilterScrollState(FilterId filterId);
++
++  [[nodiscard]] not_null<Ui::QuickActionContext *> ensureQuickAction(int64 key);
++  void deactivateQuickAction();
++  void updateQuickActionRow(int64 key);
++
++  [[nodiscard]] bool lookupIsInBotAppButton(Row *row, QPoint localPosition);
++  [[nodiscard]] bool lookupIsInRightButton(const RightButton &button,
++                                           QPoint localPosition);
++  [[nodiscard]] RightButton *maybeCacheRightButton(Row *row);
++  void fillRightButton(RightButton &button, const TextWithEntities &text,
++                       const style::DialogRightButton &st);
++
++  [[nodiscard]] QImage *cacheChatsFilterTag(const Data::ChatFilter &filter,
++                                            uint8 more, bool active);
++
++  void performDrag();
++
++  const not_null<Window::SessionController *> _controller;
++
++  not_null<IndexedList *> _shownList;
++  std::unique_ptr<IndexedList> _chatcraftProjection;
++  std::vector<Key> _chatcraftKeys;
++  FilterId _chatcraftProjectionFilterId = 0;
++  bool _chatcraftRefreshScheduled = false;
++  bool _chatcraftDirty = true;
++  IndexedList *_chatcraftSource = nullptr;
++  Data::Folder *_chatcraftFolder = nullptr;
++  std::unique_ptr<Api::PeerSearchResult> _chatcraftPeerSearch;
++  FilterId _filterId = 0;
++  bool _mouseSelection = false;
++  std::optional<QPoint> _lastMousePosition;
++  int _lastRowLocalMouseX = -1;
++  Qt::MouseButton _pressButton = Qt::LeftButton;
++
++  Data::Folder *_openedFolder = nullptr;
++  Data::Forum *_openedForum = nullptr;
++  rpl::lifetime _openedForumLifetime;
++  Data::CommunityInfo *_openedCommunity = nullptr;
++
++  std::vector<std::unique_ptr<CollapsedRow>> _collapsedRows;
++  not_null<const style::DialogRow *> _st;
++  mutable std::unique_ptr<Ui::TopicJumpCache> _topicJumpCache;
++  base::flat_map<uint64, CachedRow> _cachedRows;
++  Ui::RowsScrollCache _rowsScrollCache{[this] {
++    _cachedRows.clear();
++    update();
++  }};
++  bool _selectedChatTypeFilter = false;
++  bool _pressedChatTypeFilter = false;
++  bool _selectedMorePosts = false;
++  bool _pressedMorePosts = false;
++  int _collapsedSelected = -1;
++  int _collapsedPressed = -1;
++  bool _skipTopDialog = false;
++  Row *_selected = nullptr;
++  Row *_pressed = nullptr;
++  MsgId _pressedTopicJumpRootId;
++  PeerId _pressedSublistJumpPeerId;
++  bool _selectedTopicJump = false;
++  bool _pressedTopicJump = false;
++
++  RightButton *_pressedRightButtonData = nullptr;
++  bool _pressedRightButtonSponsored = false;
++  bool _selectedRightButton = false;
++  bool _pressedRightButton = false;
++
++  Row *_qdragging = nullptr;
++
++  Row *_dragging = nullptr;
++  int _draggingIndex = -1;
++  int _aboveIndex = -1;
++  QPoint _dragStart;
++  std::vector<PinnedRow> _pinnedRows;
++  Ui::Animations::Basic _pinnedShiftAnimation;
++  base::flat_set<Key> _pinnedOnDragStart;
++
++  mutable const Row *_activeSubItemsRow = nullptr;
++  mutable std::vector<SubItem> _activeSubItems;
++
++  // Remember the last currently dragged row top shift for updating area.
++  int _aboveTopShift = -1;
++  int _narrowWidth = 0;
++
++  int _visibleTop = 0;
++  int _visibleBottom = 0;
++  QString _filter, _hashtagFilter;
++
++  std::vector<std::unique_ptr<HashtagResult>> _hashtagResults;
++  int _hashtagSelected = -1;
++  int _hashtagPressed = -1;
++  bool _hashtagDeleteSelected = false;
++  bool _hashtagDeletePressed = false;
++
++  std::vector<FilterResult> _filterResults;
++  base::flat_map<Key, std::unique_ptr<Row>> _filterResultsGlobal;
++  int _filteredSelected = -1;
++  int _filteredPressed = -1;
++
++  EmptyState _emptyState = EmptyState::None;
++
++  base::flat_set<not_null<History *>> _trackedHistories;
++  rpl::lifetime _trackedLifetime;
++
++  QString _peerSearchQuery;
++  base::flat_set<not_null<PeerData *>> _sponsoredRemoved;
++  std::vector<std::unique_ptr<PeerSearchResult>> _peerSearchResults;
++  int _peerSearchSelected = -1;
++  int _peerSearchPressed = -1;
++  int _peerSearchMenu = -1;
++
++  std::vector<std::unique_ptr<FakeRow>> _previewResults;
++  int _previewCount = 0;
++  int _previewSelected = -1;
++  int _previewPressed = -1;
++  int _morePostsWidth = 0;
++  int _chatTypeFilterWidth = 0;
++
++  std::vector<std::unique_ptr<FakeRow>> _searchResults;
++  int _searchedCount = 0;
++  int _searchedMigratedCount = 0;
++  int _searchedSelected = -1;
++  int _searchedPressed = -1;
++
++  CommunityRowsView _communityViewable;
++  object_ptr<CommunityRequestableList> _communityRequestableList = {nullptr};
++  int _communitySelected = -1;
++  int _communityPressed = -1;
++  int _communityRequestableCount = 0;
++  rpl::lifetime _openedCommunityLifetime;
++
++  WidgetState _state = WidgetState::Default;
++
++  std::unique_ptr<ChatSearchIn> _searchIn;
++  rpl::event_stream<ChatSearchTab> _changeSearchTabRequests;
++  rpl::event_stream<ChatTypeFilter> _changeSearchFilterRequests;
++  rpl::event_stream<bool> _changeSearchFromArchiveRequests;
++  rpl::event_stream<> _resetSearchRestrictionsRequests;
++  rpl::event_stream<> _cancelSearchRequests;
++  rpl::event_stream<> _cancelSearchFromRequests;
++  rpl::event_stream<> _changeSearchFromRequests;
++  object_ptr<Ui::RpWidget> _loadingAnimation = {nullptr};
++  object_ptr<SearchEmpty> _searchEmpty = {nullptr};
++  SearchState _searchEmptyState;
++  object_ptr<Ui::FlatLabel> _empty = {nullptr};
++  object_ptr<Ui::VerticalLayout> _emptyList = {nullptr};
++  object_ptr<Ui::RoundButton> _emptyButton = {nullptr};
++
++  Ui::DraggingScrollManager _draggingScroll;
++
++  SearchState _searchState;
++  HashOrCashtag _searchHashOrCashtag = {};
++  bool _searchWithPostsPreview = false;
++  History *_searchInMigrated = nullptr;
++  PeerData *_searchFromShown = nullptr;
++  Ui::Text::String _searchFromUserText;
++  std::unique_ptr<SearchTags> _searchTags;
++  int _searchTagsLeft = 0;
++  RowDescriptor _menuRow;
++
++  base::flat_map<not_null<PeerData *>, std::unique_ptr<Ui::VideoUserpic>>
++      _videoUserpics;
++
++  base::flat_map<FilterId, int> _chatsFilterScrollStates;
++  int _communityScrollTop = 0;
++
++  std::unordered_map<ChatsFilterTagsKey, TagCache> _chatsFilterTags;
++  bool _waitingAllChatListEntryRefreshesForTags = false;
++  rpl::lifetime _handleChatListEntryTagRefreshesLifetime;
++
++  std::unordered_map<PeerId, RightButton> _rightButtons;
++
++  Fn<void()> _loadMoreCallback;
++  Fn<void()> _loadMoreFilteredCallback;
++  rpl::event_stream<> _listBottomReached;
++  rpl::event_stream<ChosenRow> _chosenRow;
++  rpl::event_stream<> _updated;
++
++  rpl::event_stream<Ui::ScrollToRequest> _mustScrollTo;
++  rpl::event_stream<Ui::ScrollToRequest> _dialogMoved;
++  rpl::event_stream<SearchRequestDelay> _searchRequests;
++  rpl::event_stream<QString> _completeHashtagRequests;
++  rpl::event_stream<> _refreshHashtagsRequests;
++  rpl::event_stream<UserId> _openBotMainAppRequests;
++
++  using QuickActionPtr = std::unique_ptr<Ui::QuickActionContext>;
++  QuickActionPtr _activeQuickAction;
++  std::vector<QuickActionPtr> _inactiveQuickActions;
++
++  RowDescriptor _chatPreviewRow;
++  bool _chatPreviewScheduled = false;
++  std::optional<QPoint> _chatPreviewTouchGlobal;
++  base::Timer _touchDragPinnedTimer;
++  std::optional<QPoint> _touchDragStartGlobal;
++  std::optional<QPoint> _touchDragNowGlobal;
++  rpl::event_stream<> _touchCancelRequests;
++
++  rpl::variable<ChildListShown> _childListShown;
++  base::Timer _freezeTimer;
++  float64 _narrowRatio = 0.;
++  bool _geometryInited = false;
++
++  Data::SavedMessages *_savedSublists = nullptr;
++
++  bool _searchLoading = false;
++  bool _searchWaiting = false;
++
++  base::unique_qptr<Ui::PopupMenu> _menu;
+ };
+ 
+ } // namespace Dialogs
+diff --git a/Telegram/SourceFiles/main/main_domain.h b/Telegram/SourceFiles/main/main_domain.h
+index 7f85abc8fd..1d5f8bf694 100644
+--- a/Telegram/SourceFiles/main/main_domain.h
++++ b/Telegram/SourceFiles/main/main_domain.h
+@@ -36,8 +36,9 @@ public:
+ 		std::unique_ptr<Account> account;
+ 	};
+ 
+-	static constexpr auto kMaxAccounts = 3;
+-	static constexpr auto kPremiumMaxAccounts = 6;
++	static constexpr auto kMaxAccounts = CHATCRAFT_MAX_ACCOUNTS;
++	static constexpr auto kPremiumMaxAccounts = CHATCRAFT_MAX_ACCOUNTS;
++	static_assert(kMaxAccounts >= 1 && kMaxAccounts <= 20);
+ 
+ 	explicit Domain(const QString &dataName);
+ 	~Domain();
+diff --git a/Telegram/SourceFiles/mtproto/session_private.cpp b/Telegram/SourceFiles/mtproto/session_private.cpp
+index b8be9bbdda..4202e58474 100644
+--- a/Telegram/SourceFiles/mtproto/session_private.cpp
++++ b/Telegram/SourceFiles/mtproto/session_private.cpp
+@@ -88,7 +88,7 @@ using namespace details;
+ #else
+ 	const auto arch = ' ' + QSysInfo::buildCpuArchitecture();
+ #endif
+-	return QString::fromLatin1(AppVersionStr) + arch + ([] {
++	return u"Chatcraft "_q + QString::fromLatin1(AppVersionStr) + arch + ([] {
+ #if defined OS_MAC_STORE
+ 		return u" Mac App Store"_q;
+ #elif defined OS_WIN_STORE // OS_MAC_STORE
 diff --git a/Telegram/SourceFiles/settings/sections/settings_main.cpp b/Telegram/SourceFiles/settings/sections/settings_main.cpp
 index 62e91ea63b..7c248a8fd6 100644
 --- a/Telegram/SourceFiles/settings/sections/settings_main.cpp
@@ -16447,3 +18368,45 @@ index db8dcec6c6..7f8f6e7900 100644
  }
  
  } // namespace Window
+diff --git a/Telegram/cmake/telegram_options.cmake b/Telegram/cmake/telegram_options.cmake
+index 049f39cc92..ca3d85ea08 100644
+--- a/Telegram/cmake/telegram_options.cmake
++++ b/Telegram/cmake/telegram_options.cmake
+@@ -6,13 +6,34 @@
+ 
+ option(TDESKTOP_API_TEST "Use test API credentials." OFF)
+ option(TDESKTOP_BUILD_UPDATE_TESTS "Build the focused update verification test." OFF)
+-set(TDESKTOP_API_ID "0" CACHE STRING "Provide 'api_id' for the Telegram API access.")
++set(TDESKTOP_API_ID "" CACHE STRING "Provide 'api_id' for the Telegram API access.")
+ set(TDESKTOP_API_HASH "" CACHE STRING "Provide 'api_hash' for the Telegram API access.")
+ 
++# Environment credentials stay out of CMakeCache.txt; explicit CMake values win.
++if (TDESKTOP_API_ID STREQUAL "")
++    set(TDESKTOP_API_ID "$ENV{CHATCRAFT_API_ID}")
++endif()
++if (TDESKTOP_API_HASH STREQUAL "")
++    set(TDESKTOP_API_HASH "$ENV{CHATCRAFT_API_HASH}")
++endif()
++
+ if (TDESKTOP_API_TEST)
+-    set(TDESKTOP_API_ID 17349)
+-    set(TDESKTOP_API_HASH 344583e45741c457fe1862106095a5eb)
++    message(FATAL_ERROR "Chatcraft requires its own Telegram API credentials; test credentials are disabled.")
++endif()
++
++string(LENGTH "${TDESKTOP_API_HASH}" chatcraft_api_hash_length)
++if (NOT TDESKTOP_API_ID MATCHES "^[1-9][0-9]*$"
++    OR TDESKTOP_API_ID GREATER 2147483647
++    OR NOT TDESKTOP_API_HASH MATCHES "^[0-9a-fA-F]+$"
++    OR NOT chatcraft_api_hash_length EQUAL 32)
++    message(FATAL_ERROR "Provide a positive int32 Telegram API ID and a 32-digit hexadecimal API hash via CMake or CHATCRAFT_API_ID/CHATCRAFT_API_HASH.")
++endif()
++
++set(CHATCRAFT_MAX_ACCOUNTS "6" CACHE STRING "Local account capacity (1-20), not a Telegram server limit.")
++if (NOT CHATCRAFT_MAX_ACCOUNTS MATCHES "^([1-9]|1[0-9]|20)$")
++    message(FATAL_ERROR "CHATCRAFT_MAX_ACCOUNTS must be an integer from 1 to 20.")
+ endif()
++target_compile_definitions(Telegram PRIVATE CHATCRAFT_MAX_ACCOUNTS=${CHATCRAFT_MAX_ACCOUNTS})
+ 
+ if (TDESKTOP_API_ID STREQUAL "0" OR TDESKTOP_API_HASH STREQUAL "")
+     message(FATAL_ERROR

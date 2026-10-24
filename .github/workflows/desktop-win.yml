@@ -25,6 +25,17 @@ jobs:
       - name: Clone.
         uses: actions/checkout@v4
 
+      - name: Validate Chatcraft API configuration.
+        shell: pwsh
+        env:
+          CHATCRAFT_API_ID: ${{ secrets.CHATCRAFT_API_ID }}
+          CHATCRAFT_API_HASH: ${{ secrets.CHATCRAFT_API_HASH }}
+        run: |
+          if ($env:CHATCRAFT_API_ID -notmatch '^[1-9][0-9]*$' -or
+              $env:CHATCRAFT_API_HASH -notmatch '^[0-9a-fA-F]{32}$') {
+            throw 'Configure CHATCRAFT_API_ID and CHATCRAFT_API_HASH repository secrets. Fork PRs without secrets cannot build Desktop.'
+          }
+
       - name: Init desktop submodule.
         # 只拉 desktop：android/ios 暂不需要，且 ios 的嵌套子模块源仓库已失效
         shell: bash
@@ -170,13 +181,17 @@ jobs:
         run: python scripts/prepare-desktop.py --check
 
       - name: Telegram Desktop build.
-        # 使用官方测试 api_id/hash，无需配置 secrets；仅供本地测试，不可分发
+        # Pass secrets as environment data, never interpolate them into shell source.
+        env:
+          CHATCRAFT_API_ID: ${{ secrets.CHATCRAFT_API_ID }}
+          CHATCRAFT_API_HASH: ${{ secrets.CHATCRAFT_API_HASH }}
         run: |
           cd %TBUILD%\desktop\Telegram
 
           call configure.bat ^
           x64 ^
-          -D TDESKTOP_API_TEST=ON ^
+          -D TDESKTOP_API_TEST=OFF ^
+          -D CHATCRAFT_MAX_ACCOUNTS=6 ^
           -D CMAKE_CONFIGURATION_TYPES=Debug ^
           -D CMAKE_COMPILE_WARNING_AS_ERROR=ON ^
           -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^

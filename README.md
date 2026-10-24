@@ -43,6 +43,10 @@ examples/
 
 显式脚本先加载，再按路径排序加载目录脚本。显式脚本失败会使引擎创建失败；目录中失败脚本被跳过，其他脚本继续。各脚本状态独立，顺序可能影响决策。错误和无效结果按不决策处理，不会撤销其他有效规则。
 
+同一脚本重复定义 `chatcraft.filter_message` 会覆盖旧函数，并非追加。需要组合规则时使用 `chatcraft.register_filter_message(function(msg) ... end)`；界面和会话列表分别使用 `register_filter_ui`、`register_filter_chat_list`。可重复注册，详细聚合规则见 Lua 类型文档。消息回调不匹配时返回 `nil`，不要返回会提前结束匹配的 `allow`。
+
+自有 Telegram API 凭据、Chatcraft 会话身份和本地账号容量配置见 [桌面集成](docs/desktop-integration.md)。这些配置在原生启动/构建阶段生效，不向 Lua 暴露 API 凭据，也不能绕过 Telegram 服务端限制。
+
 ## Lua 文档与编辑器
 
 **[docs/lua/chatcraft.lua](docs/lua/chatcraft.lua) 是 Lua API 类型、字段、约束和兼容语义的唯一维护来源**，中文注释可直接通过 LuaLS 悬停和补全查看。示例位于 [examples/lua](examples/lua)。不再在 README 维护另一份 API 表格。
