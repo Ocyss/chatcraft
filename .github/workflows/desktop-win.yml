@@ -184,6 +184,8 @@ jobs:
           call configure.bat ^
           x64 ^
           -D TDESKTOP_API_TEST=OFF ^
+          -D "CHATCRAFT_API_ID=%CHATCRAFT_API_ID%" ^
+          -D "CHATCRAFT_API_HASH=%CHATCRAFT_API_HASH%" ^
           -D CHATCRAFT_MAX_ACCOUNTS=6 ^
           -D CMAKE_CONFIGURATION_TYPES=Debug ^
           -D CMAKE_COMPILE_WARNING_AS_ERROR=ON ^
