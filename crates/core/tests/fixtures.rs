@@ -17,7 +17,7 @@ struct Expect {
 
 #[test]
 fn fixtures_match_expectations() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let cases: Vec<Case> = serde_json::from_str(
         &std::fs::read_to_string(root.join("tests/fixtures/messages.json")).unwrap(),
     )

@@ -3,20 +3,21 @@
 ## 布局
 
 ```
-crates/core   # 纯 Rust 跨平台核心：规则引擎、Lua 脚本、广告开关
+crates/core   # Rust 内置设置；旧规则引擎和 Lua API 保留兼容
 crates/ffi    # C ABI (cdylib + staticlib)，供 Desktop/Android/iOS 调用
-scripts/      # 开发与 CI 构建工具（Python 等）
-examples/lua/ # 客户端运行时 Lua 过滤示例，不自动加载
-tests/fixtures # 跨平台共享测试用例
+examples/lua/ # 历史兼容示例，不随桌面包分发
+crates/core/tests/fixtures # 跨平台共享测试用例
 clients/      # 官方客户端 fork (git submodule)，原生接入直接提交到 fork
+clients/desktop/Telegram/build/chatcraft/ # 桌面构建辅助工具
 ```
 
-## 环境变量
+## 设置与源码归属
 
-| 变量                    | 取值       | 作用                                  |
-| ----------------------- | ---------- | ------------------------------------- |
-| `CHATCRAFT_DISABLE_ADS` | 1/true/yes | 禁用官方 sponsored 广告（默认即禁用） |
-| `CHATCRAFT_ENABLE_ADS`  | 1/true/yes | 显式恢复官方广告                      |
+桌面采用 Rust 内置设置，不由 Lua 管理。原生设置界面、刷新及客户端接入归属 Desktop fork；设置格式、持久化与判断归属 `crates/core`，C ABI 归属 `crates/ffi`。配置位于 Telegram 工作数据目录的 `tdata/chatcraft/settings.json`，同一工作数据目录中的账号共享，不按账号拆分，也不自动云同步。
+
+桌面内置设置包括主列表隐藏已归入任意自定义文件夹的会话、sponsored 广告及稳定界面 ID 可见性。`read_first` 仅在核心中预留，尚未接入桌面排序。旧 Lua API 与广告环境变量保留用于 core 兼容，不作为新桌面设置入口或发布包约定。
+
+客户端改动直接维护在 fork，不使用主仓库 patch、overlay 或构建时重写受版本控制源码。当前 fork 接入仍含本地未提交改动；必须另行授权提交、推送并更新主仓库子模块指针，干净 CI 才能使用该实现。
 
 ## 构建
 
@@ -47,6 +48,8 @@ cargo build -p chatcraft-ffi --release --target aarch64-apple-ios
 ```
 
 ## 平台接入约定
+
+内置设置经独立设置 C ABI 接入，不依赖 Lua 引擎创建。以下消息过滤接口保留作旧 API 兼容，不表示新桌面设置仍通过 Lua 执行：
 
 平台侧把原生消息序列化成 `Message` 的 JSON，调用
 `chatcraft_filter_message()`，按返回 JSON 里的 `action`

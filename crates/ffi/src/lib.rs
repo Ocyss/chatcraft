@@ -27,6 +27,9 @@ use std::panic::AssertUnwindSafe;
 
 use chatcraft_core::{Engine, EngineConfig, Message, UiItem};
 
+mod settings;
+pub use settings::*;
+
 fn read_str<'a>(ptr: *const c_char) -> Option<&'a str> {
     if ptr.is_null() {
         return None;

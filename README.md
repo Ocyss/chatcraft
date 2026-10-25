@@ -1,74 +1,34 @@
 # Chatcraft
 
-为 Telegram 客户端提供本地可编程过滤：Rust 核心执行规则与 Lua，C ABI 连接桌面端，支持消息、界面、会话列表过滤及脚本管理。
+Telegram 客户端的本地设置与过滤扩展。当前桌面方案采用 **Rust 内置设置 + 原生设置界面**，不以 Lua 管理功能，也不随发布包安装 Lua 脚本、示例或 LuaLS 类型库。旧 Lua 引擎与 API 保留在 core 中用于兼容，不代表桌面仍提供脚本管理器。
 
-过滤仅改变本地显示，不删除服务器消息、退出会话或修改服务器文件夹。当前桌面支持消息隐藏、界面隐藏和会话列表隐藏/排序；`collapse`、`highlight` 尚无显示效果。
+## 设置与配置
 
-## 使用
+桌面设置由 fork 原生界面接入 Rust，通过 C ABI 读取、判断并保存。桌面设置支持隐藏已归入任意自定义文件夹的主列表会话、隐藏 sponsored 广告及按稳定 ID 隐藏界面入口。`read_first` 仅在核心中预留，尚未接入桌面排序，也不提供桌面开关。它们仅改变本地显示，不删除服务器消息、退出会话、授予 Premium 或绕过服务端限制。
 
-使用启用了 Chatcraft FFI 的桌面构建，从主菜单打开「Lua 脚本管理」，查看实际目录、元数据及加载错误。默认扫描可执行文件旁 `scripts/` 的直接子文件 `.lua`，不递归。修改、添加、删除或停用脚本后，需**完全退出（包括托盘进程）并重启**，不支持热重载。
+配置保存在 Telegram 工作数据目录下的 `tdata/chatcraft/settings.json`，不是可执行文件旁的 Lua 目录。同一安装使用同一工作数据目录的账号共享这份配置；不同工作数据目录分别保存，配置不会经 Telegram 自动同步。迁移安装时需连同相应数据目录迁移；不要把个人配置打入公共发布包。保存失败时应检查原生界面的错误提示及数据目录权限。
 
-发布包约定（CI 打包另行维护）：
+当前配置格式版本为 `1`，默认不隐藏已分组会话、隐藏 sponsored 广告，且不隐藏其他界面入口。UI 显隐列表目前覆盖 22 个已接入的稳定 ID，并非任意控件自动扫描；未知项目默认显示。隐藏设置页入口不等于禁止访问，该入口仍可能出现在原生设置搜索中。启用会话过滤时暂不支持在主列表拖动置顶顺序，可在关闭过滤后调整。设置由 Rust 持久化，原生界面负责交互与刷新。客户端实际行为仍需完成 fork 接入后的编译与手工验证，不能以核心测试代替。
 
-```text
-Telegram.exe
-scripts/
-  welcome.lua
-  README.md
-  .luarc.json
-  types/
-    chatcraft.lua
-examples/
-  ad_filter.lua
-  ui_filter.lua
-  chat_list.lua
-```
+Telegram API 凭据、连接身份、本地账号容量与构建说明见 [桌面集成](docs/desktop-integration.md)。这些配置不由 Lua 管理。
 
-默认只启用 `welcome.lua`：启动不弹窗，首次打开管理器时演示异步确认，不改变过滤。其他示例按需复制到实际脚本目录即可启用，文件均使用正常 `.lua` 后缀；不要把整个示例目录作为默认脚本目录。
+## 源码与构建
 
-## 配置
+- `crates/core`：Rust 内置设置与兼容规则/Lua 引擎。
+- `crates/ffi`：跨语言 C ABI。
+- `clients/desktop`、`clients/android`、`clients/ios`：各客户端 fork 子模块，原生实现直接维护在 fork。
+- `clients/desktop/Telegram/build/chatcraft/build-desktop-rust.py`：桌面统一 Rust 静态库构建辅助工具。
+- `crates/core/tests/fixtures`：核心测试用例。
 
-`CHATCRAFT_SCRIPT_DIR` 可覆盖默认目录，相对路径按进程当前工作目录解析。若 `scripts/` 不存在而旧 `script/` 存在，桌面兼容使用旧目录。
-
-显式配置来源按优先级为：非空 `CHATCRAFT_CONFIG`（JSON 字符串）、读取成功的 `CHATCRAFT_CONFIG_FILE`、`CHATCRAFT_LUA_SCRIPT`（单个脚本路径）。JSON 示例：
-
-```json
-{
-  "lua_script": null,
-  "script_dir": "E:/Chatcraft/scripts"
-}
-```
-
-原有 `rules` 配置仍受支持。缺少 `script_dir` 时桌面补入默认目录；显式设为 `null` 可关闭目录扫描。只运行一个脚本时，同时指定 `lua_script` 与 `"script_dir": null`；仅设置 `CHATCRAFT_LUA_SCRIPT` 不关闭默认扫描。
-
-显式脚本先加载，再按路径排序加载目录脚本。显式脚本失败会使引擎创建失败；目录中失败脚本被跳过，其他脚本继续。各脚本状态独立，顺序可能影响决策。错误和无效结果按不决策处理，不会撤销其他有效规则。
-
-同一脚本重复定义 `chatcraft.filter_message` 会覆盖旧函数，并非追加。需要组合规则时使用 `chatcraft.register_filter_message(function(msg) ... end)`；界面和会话列表分别使用 `register_filter_ui`、`register_filter_chat_list`。可重复注册，详细聚合规则见 Lua 类型文档。消息回调不匹配时返回 `nil`，不要返回会提前结束匹配的 `allow`。
-
-自有 Telegram API 凭据、Chatcraft 会话身份和本地账号容量配置见 [桌面集成](docs/desktop-integration.md)。这些配置在原生启动/构建阶段生效，不向 Lua 暴露 API 凭据，也不能绕过 Telegram 服务端限制。
-
-## Lua 文档与编辑器
-
-**[docs/lua/chatcraft.lua](docs/lua/chatcraft.lua) 是 Lua API 类型、字段、约束和兼容语义的唯一维护来源**，中文注释可直接通过 LuaLS 悬停和补全查看。示例位于 [examples/lua](examples/lua)。不再在 README 维护另一份 API 表格。
-
-仓库 `.luarc.json` 将 `docs/lua` 加入 LuaLS 类型库，运行时设为 Lua 5.4。类型文件只供编辑器索引，**不要执行或 require**，也不要替换宿主提供的 `chatcraft` 表。
-
-发布时将该类型文件复制到 `scripts/types/chatcraft.lua`，根 README 复制到 `scripts/README.md`；包内 `scripts/.luarc.json` 的 `workspace.library` 改为 `["types"]`，保留 Lua 5.4 和 `workspace.checkThirdParty: false`。`types/` 不参与非递归脚本扫描。
-
-## 构建
-
-需要支持 Rust 2024 edition 的工具链及本地 C/C++ 构建环境（Lua 随 `mlua` 构建）：
+不再使用主仓库 patch、overlay 或构建前源码重写维护客户端实现。Windows CI 检出固定子模块提交，沿用上游 prepare 工具链，并将 Chatcraft 编入既有 `tdesktop_rust.lib`；产物不需要独立 Chatcraft DLL。
 
 ```sh
 cargo test --workspace
 cargo build --release -p chatcraft-ffi
 ```
 
-桌面构建与接入另见 [桌面集成](docs/desktop-integration.md)，项目设计见 [架构](docs/architecture.md)。桌面源码位于 `clients/desktop` 子模块，Rust 核心与 ABI 位于 `crates/core`、`crates/ffi`；仓库根 `scripts/` 是开发工具目录，不是发布包的运行脚本目录。
+核心依赖 Lua 的兼容实现仍需本地 C/C++ 构建环境。旧 API 类型说明见 [docs/lua/chatcraft.lua](docs/lua/chatcraft.lua)，历史示例见 `examples/lua`，仅作兼容参考，不自动加载或打包。
 
-## 安全与排错
+**当前 fork 存在本地未提交接入改动，迁入的构建脚本也尚未提交、推送，主仓库子模块指针未推进。因此干净 CI 尚不能复现这份本地集成。** 需要另行授权发布 fork 提交并更新主仓库指针后再验证 CI。
 
-- **仅运行可信脚本。Lua 环境不是安全沙箱。** 指令限制不等于墙钟超时或内存上限；回调应快速、无阻塞，避免高频过滤路径执行 I/O 或弹窗。
-- 不生效时先检查 FFI 是否启用、管理器加载状态、实际目录、`.lua` 后缀及配置覆盖，再完全退出重启并查看日志。
-- 脚本 `update_url` 仅展示，不自动联网检查、下载或安装。
-- 定制桌面版禁用官方自动更新，避免被官方版本覆盖；暂未配置 Chatcraft 更新源，请手动安装本项目后续版本。
+项目设计见 [架构](docs/architecture.md)。定制桌面版禁用官方自动更新，不分发 `Updater.exe`；暂未配置 Chatcraft 更新源，请手动安装后续版本。

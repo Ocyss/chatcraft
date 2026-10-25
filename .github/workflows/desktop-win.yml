@@ -43,10 +43,6 @@ jobs:
           git submodule update --init clients/desktop
           git -C clients/desktop submodule update --init --recursive
 
-      - name: Apply and verify Desktop UI integration.
-        # 子模块提交不包含本地未提交改动；从主仓库应用受版本控制的 UI overlay。
-        run: python scripts/prepare-desktop.py
-
       - name: Prepare directories.
         # 复刻官方布局：TBuild\Libraries 与客户端仓库互为兄弟目录
         run: |
@@ -70,7 +66,7 @@ jobs:
 
           echo "$(sha256sum $TBUILD/desktop/$PREPARE_PATH | awk '{ print $1 }')" >> CACHE_KEY.txt
           echo "$SDK" >> CACHE_KEY.txt
-          echo "${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/**', 'scripts/build-desktop-rust.py', '.github/workflows/desktop-win.yml') }}" >> CACHE_KEY.txt
+          echo "${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/**', 'clients/desktop/Telegram/build/chatcraft/build-desktop-rust.py', '.github/workflows/desktop-win.yml') }}" >> CACHE_KEY.txt
           echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> $GITHUB_ENV
 
           git config --global user.email "ci@chatcraft.local"
@@ -128,7 +124,7 @@ jobs:
       - name: Build unified Rust static library.
         # 沿用 prepare 的工具链、Win7 target、build-std 和静态 CRT。
         # 即使恢复了旧前缀缓存也必须重建，不能复用未包含 ChatCraft 的库。
-        run: python scripts/build-desktop-rust.py --libraries "%LibrariesPath%"
+        run: python clients/desktop/Telegram/build/chatcraft/build-desktop-rust.py --libraries "%LibrariesPath%"
 
       # 立即保存缓存（即使后续步骤失败），避免重跑时重建 Qt 等耗时依赖
       - name: ThirdParty cache save.
@@ -177,9 +173,6 @@ jobs:
         # 保留 tdesktop_rust：清理白名单不含 .cpp，会误删 wallet_engine 生成代码
         run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' -o -path '*/tdesktop_rust/*' ')' -type f ')' -o -empty ')' -delete
 
-      - name: Verify Desktop UI integration before compiling.
-        run: python scripts/prepare-desktop.py --check
-
       - name: Telegram Desktop build.
         # Pass secrets as environment data, never interpolate them into shell source.
         env:
@@ -205,19 +198,12 @@ jobs:
         run: |
           set OUT=%TBUILD%\desktop\out\Debug
           mkdir artifact
-          mkdir artifact\scripts
-          copy examples\lua\welcome.lua artifact\scripts\welcome.lua
-          copy README.md artifact\scripts\README.md
+
           copy README.md artifact\README.md
-          mkdir artifact\scripts\types
-          copy docs\lua\chatcraft.lua artifact\scripts\types\chatcraft.lua
-          echo {"runtime":{"version":"Lua 5.4"},"workspace":{"library":["types"],"checkThirdParty":false}}>artifact\scripts\.luarc.json
-          mkdir artifact\examples
-          copy examples\lua\chat_list.lua artifact\examples\chat_list.lua
-          copy examples\lua\ad_filter.lua artifact\examples\ad_filter.lua
-          copy examples\lua\ui_filter.lua artifact\examples\ui_filter.lua
+
           echo Source commit: %GITHUB_SHA%>artifact\BUILD-INFO.txt
-          echo Desktop UI: script manager, folder opener, stable ID filtering>>artifact\BUILD-INFO.txt
+          git -C clients\desktop rev-parse HEAD >>artifact\BUILD-INFO.txt
+          echo Desktop UI: Rust built-in settings, no Lua runtime package>>artifact\BUILD-INFO.txt
           move %OUT%\Telegram.exe artifact/
           rem Official auto-update is disabled; do not distribute Updater.exe.
 

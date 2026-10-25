@@ -4,16 +4,7 @@ name: core
 on:
   push:
     branches: [main]
-    paths:
-      [
-        "crates/**",
-        "tests/**",
-        "examples/**",
-        "scripts/**",
-        "Cargo.*",
-        "clients/desktop",
-        ".github/workflows/core.yml",
-      ]
+    paths: ["crates/**", "examples/**", "Cargo.*", "clients/desktop", ".github/workflows/core.yml"]
   pull_request:
 
 jobs:
@@ -27,10 +18,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-      # Overlay tests read the pinned fork files, without fetching nested dependencies.
-      - run: git submodule update --init clients/desktop
-      - run: python -m unittest discover -s tests -p test_prepare_desktop.py -v
       - run: cargo test --workspace

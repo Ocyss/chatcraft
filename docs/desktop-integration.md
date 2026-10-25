@@ -2,24 +2,21 @@
 
 ## Source ownership
 
-`clients/desktop` pins a commit in `Ocyss/Telegram-Desktop`. The fork contains
-`Telegram/SourceFiles/chatcraft/chatcraft_filter.{h,cpp}` and the small native
-hooks directly. Pending script-manager and UI-filter integration is shipped as
-`scripts/desktop-ui.patch` in the root repository, so a clean CI checkout does
-not depend on uncommitted changes inside the submodule.
+`clients/desktop` pins a commit in `Ocyss/Telegram-Desktop`. All native UI,
+settings bridges and integration hooks belong directly in that fork. Rust
+settings and persistence belong in `crates/core`, with the C ABI in `crates/ffi`.
+Desktop uses Rust built-in settings, not Lua script management.
 
-Before configuring a local Desktop build, run:
+The root-owned patch, prepare overlay and overlay tests have been removed.
+Do not apply an overlay or rewrite tracked client sources before building.
+The build helper lives in the fork's existing `Telegram/build/chatcraft/`
+directory; it only extends upstream's generated Rust build crate.
 
-```text
-python scripts/prepare-desktop.py
-```
-
-This applies the overlay once, accepts an already-applied overlay, and stops
-on conflicts without overwriting local work. `--check` verifies it without
-changing sources. Windows CI runs this after checkout and again before the
-native build. If editing the overlay sources, update the tracked patch as well.
-Once these changes are published in the Desktop fork, advance the pinned
-submodule and remove the corresponding overlay together.
+The current local fork integration and moved build helper are not committed or
+pushed, and the root submodule pin has not been advanced. A clean CI checkout
+cannot reproduce this local integration yet. Publishing the fork commit and
+updating the root pin require separate authorization; local source checks or
+build success do not remove that requirement.
 
 - `History::createItem`: evaluates rules after message construction.
 - `HistoryItem`: caches the hidden state.
@@ -35,17 +32,14 @@ framework is needed for these explicit source-level calls.
 not depend on the separate `ffi` workflow. That optional workflow includes
 Windows, Linux, macOS, Android and iOS compilation and now runs only through
 `workflow_dispatch`, while Desktop testing is the current priority. `core`
-continues running workspace tests and clean-checkout overlay regression tests.
+continues running workspace tests, with fixtures in `crates/core/tests/fixtures`.
+It no longer fetches Desktop or runs overlay tests.
 
-The Windows artifact includes `BUILD-INFO.txt` with the root source commit.
-Only `scripts/welcome.lua` is enabled by default. `scripts/README.md` is copied
-from the root README; `scripts/types/chatcraft.lua` and `.luarc.json` provide
-LuaLS completion without executing the type declarations. API documentation is
-maintained in `docs/lua/chatcraft.lua`.
-
-The `examples/` directory contains `ad_filter.lua`, `ui_filter.lua` and
-`chat_list.lua` with their normal filenames. Copy a script into `scripts/` and
-restart to enable it; no extension change is needed.
+The Windows artifact includes `Telegram.exe`, the root README and
+`BUILD-INFO.txt` recording root and Desktop commits. It does not package Lua
+runtime scripts, examples, LuaLS configuration or types. Historical Lua APIs
+remain in core for compatibility; `docs/lua/chatcraft.lua` and `examples/lua`
+are reference material, not a Desktop installation procedure.
 
 ## Unified Rust library
 
@@ -53,7 +47,7 @@ Upstream prepare builds tlottie and wallet-engine through a generated
 `tdesktop_rust` crate. After prepare, run:
 
 ```text
-python scripts/build-desktop-rust.py --libraries <Libraries/win64>
+python clients/desktop/Telegram/build/chatcraft/build-desktop-rust.py --libraries <Libraries/win64>
 ```
 
 Run this from an x64 MSVC Native Tools environment. The script uses upstream's
@@ -124,22 +118,38 @@ would also unnecessarily broaden access to them.
 
 Native changes live in the Desktop submodule and must be published in the fork
 and the root pin advanced before a clean CI checkout can consume them; they are
-not part of the UI overlay.
+not supplied by any root-owned overlay.
 
 ## Configuration
 
-- `CHATCRAFT_SCRIPT_DIR`: override the default `scripts/` next to Telegram.exe.
-- `CHATCRAFT_LUA_SCRIPT`: Lua filter path.
-- `CHATCRAFT_CONFIG_FILE`: EngineConfig JSON file.
-- `CHATCRAFT_CONFIG`: inline EngineConfig JSON (highest precedence).
-- `CHATCRAFT_DISABLE_ADS` / `CHATCRAFT_ENABLE_ADS`: sponsored-message settings.
+Native settings use the independent Rust settings ABI, not EngineConfig or a
+Lua script directory. The file is `tdata/chatcraft/settings.json` beneath
+Telegram's working data directory. Accounts in the same installation using that
+data directory share it; separate working data directories have separate files.
+It is not automatically synchronized to another device. Preserve the applicable
+data directory when moving an installation and do not distribute personal
+settings in public artifacts.
 
-Restart the process after changing configuration. Run creation and filtering on
-the same thread; the Lua engine is not Send.
+Version 1 stores `hide_grouped_chats`, `read_first`, `hide_sponsored` and
+`hidden_ui_ids`. Defaults are false, false, true and an empty set respectively.
+The native UI saves through Rust and notifies native subscribers to refresh;
+actual client behavior needs compilation and manual validation of the completed
+fork integration. Unknown JSON fields are retained; unsupported versions are
+not overwritten. Save failures must be reported rather than silently accepted.
+
+Legacy EngineConfig, Lua and advertising environment APIs remain core
+compatibility surfaces, not the new Desktop configuration contract. The legacy
+Lua engine must still be created and called on the same thread.
 
 ## Current limitations
 
-Hidden messages still contribute to unread counts and chat-list previews.
-Message edits and rule changes do not currently re-evaluate existing items.
-Only `hide` has native rendering support; `collapse` and `highlight` are reserved.
+Grouped-chat filtering affects only the main-list presentation, not folder
+membership, unread counts, archive or search results. Pinned dragging is disabled
+while this presentation is active; turn filtering off to reorder pinned chats.
+`read_first` is reserved in core and has no Desktop ordering hook or UI switch.
+The UI list currently covers 22 integrated stable IDs, not arbitrary controls;
+new upstream entries are visible by default. Hidden settings-page buttons can
+still appear in native settings search; visibility is not access control.
 Sponsored messages are hidden at the view layer, not removed from the protocol.
+Desktop no longer loads Lua message filters. The old core APIs remain available
+for compatibility, but do not imply native support for their rendering actions.

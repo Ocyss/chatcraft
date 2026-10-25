@@ -7,6 +7,7 @@ pub mod engine;
 pub mod lua;
 pub mod message;
 pub mod rules;
+pub mod settings;
 
 pub use engine::{
     ChatListItem, ChatListOutcome, Engine, EngineConfig, FilterOutcome, LifecycleEvent,

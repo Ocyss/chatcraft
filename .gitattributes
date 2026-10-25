@@ -1,2 +1,0 @@
-# Git patches must retain their literal line endings on Windows checkouts.
-/scripts/desktop-ui.patch -text
