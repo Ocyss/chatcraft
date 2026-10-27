@@ -3,10 +3,8 @@
 ## 布局
 
 ```
-crates/core   # Rust 内置设置；旧规则引擎和 Lua API 保留兼容
-crates/ffi    # C ABI (cdylib + staticlib)，供 Desktop/Android/iOS 调用
-examples/lua/ # 历史兼容示例，不随桌面包分发
-crates/core/tests/fixtures # 跨平台共享测试用例
+crates/core   # Rust 内置 settings
+crates/ffi    # 设置 C ABI (cdylib + staticlib)，供 Desktop/Android/iOS 调用
 clients/      # 官方客户端 fork (git submodule)，原生接入直接提交到 fork
 clients/desktop/Telegram/build/chatcraft/ # 桌面构建辅助工具
 ```
@@ -15,9 +13,9 @@ clients/desktop/Telegram/build/chatcraft/ # 桌面构建辅助工具
 
 桌面采用 Rust 内置设置，不由 Lua 管理。原生设置界面、刷新及客户端接入归属 Desktop fork；设置格式、持久化与判断归属 `crates/core`，C ABI 归属 `crates/ffi`。配置位于 Telegram 工作数据目录的 `tdata/chatcraft/settings.json`，同一工作数据目录中的账号共享，不按账号拆分，也不自动云同步。
 
-桌面内置设置包括主列表隐藏已归入任意自定义文件夹的会话、sponsored 广告及稳定界面 ID 可见性。`read_first` 仅在核心中预留，尚未接入桌面排序。旧 Lua API 与广告环境变量保留用于 core 兼容，不作为新桌面设置入口或发布包约定。
+桌面内置设置包括主列表隐藏已归入任意自定义文件夹的会话、sponsored 广告及稳定界面 ID 可见性。`read_first` 仅在核心中预留，尚未接入桌面排序。Lua、关键词规则引擎、旧 FFI 与 fixtures 已删除，core 仅保留 settings。
 
-客户端改动直接维护在 fork，不使用主仓库 patch、overlay 或构建时重写受版本控制源码。当前 fork 接入仍含本地未提交改动；必须另行授权提交、推送并更新主仓库子模块指针，干净 CI 才能使用该实现。
+客户端改动直接维护在 fork，不使用主仓库 patch、overlay 或构建时重写受版本控制源码。当前 fork 接入仍含本地未提交、未推送改动，主仓库子模块指针尚未更新，干净 CI 尚不能复现该实现；提交、推送及更新指针必须另行授权。
 
 ## 构建
 
@@ -49,11 +47,6 @@ cargo build -p chatcraft-ffi --release --target aarch64-apple-ios
 
 ## 平台接入约定
 
-内置设置经独立设置 C ABI 接入，不依赖 Lua 引擎创建。以下消息过滤接口保留作旧 API 兼容，不表示新桌面设置仍通过 Lua 执行：
+内置设置经设置 C ABI 读取、判断与保存，原生界面负责交互与刷新；广告及已分组会话隐藏仍由原生接入执行。
 
-平台侧把原生消息序列化成 `Message` 的 JSON，调用
-`chatcraft_filter_message()`，按返回 JSON 里的 `action`
-(`allow|hide|collapse|highlight`) 执行 UI 操作。Lua 和规则不直接接触
-任何平台 UI 控件。
-
-`Engine` 非线程安全（Lua 运行时限制），请在同一线程创建与调用。
+Desktop 在构建时生成 UI ID 目录，目前共 166 项，替代原有 22 项白名单。settings builder 的稳定字面量 ID 与 main-menu 已接入，显隐列表提供独立固定高度滚动区域与搜索。计算型 ID 和 Qt `objectName` 尚未通用覆盖，目录不代表所有控件均可隐藏；未知项目默认显示。

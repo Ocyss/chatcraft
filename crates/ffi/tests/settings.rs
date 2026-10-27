@@ -12,6 +12,7 @@ fn settings_abi_roundtrip_errors_and_null_defaults() {
         assert!(chatcraft_settings_open(c"".as_ptr()).is_null());
         let handle = chatcraft_settings_open(path.as_ptr());
         assert!(!handle.is_null());
+        assert!(chatcraft_settings_hide_sponsored(handle));
         assert!(chatcraft_settings_set_json(handle, c"{\"hidden_ui_ids\":[\"future.id\"],\"hide_grouped_chats\":true,\"read_first\":true,\"hide_sponsored\":false}".as_ptr()));
         assert!(!chatcraft_settings_ui_visible(
             handle,
@@ -33,6 +34,11 @@ fn settings_abi_roundtrip_errors_and_null_defaults() {
             handle,
             c"future.id".as_ptr()
         ));
+        assert!(chatcraft_settings_set_json(
+            handle,
+            c"{\"hide_sponsored\":true}".as_ptr()
+        ));
+        assert!(chatcraft_settings_hide_sponsored(handle));
         assert!(chatcraft_settings_set_json(handle, c"{}".as_ptr()));
         assert!(chatcraft_settings_last_error(handle).is_null());
         chatcraft_settings_free(handle);
@@ -40,6 +46,16 @@ fn settings_abi_roundtrip_errors_and_null_defaults() {
         assert!(chatcraft_settings_hide_sponsored(reopened));
         chatcraft_settings_free(reopened);
         chatcraft_settings_free(std::ptr::null_mut());
+        chatcraft_string_free(std::ptr::null_mut());
+        assert!(chatcraft_settings_hide_sponsored(std::ptr::null_mut()));
+        assert!(chatcraft_settings_get_json(std::ptr::null_mut()).is_null());
+        assert!(chatcraft_settings_last_error(std::ptr::null_mut()).is_null());
+        assert!(!chatcraft_settings_chat_list_hide(
+            std::ptr::null_mut(),
+            true,
+            0,
+            true
+        ));
         assert!(chatcraft_settings_ui_visible(
             std::ptr::null_mut(),
             c"id".as_ptr()

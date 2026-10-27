@@ -1,4 +1,4 @@
-//! Built-in settings, independent of the Lua engine.
+//! Built-in settings and persistence.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;

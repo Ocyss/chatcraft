@@ -1,4 +1,4 @@
-//! Native settings ABI. No Lua engine is created or called.
+//! Native settings ABI.
 //! Handles must not be accessed concurrently, including free. Strings are UTF-8,
 //! NUL-terminated; returned strings belong to chatcraft_string_free.
 use super::{into_c_string, read_str};

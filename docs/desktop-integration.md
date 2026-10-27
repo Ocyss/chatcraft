@@ -5,7 +5,8 @@
 `clients/desktop` pins a commit in `Ocyss/Telegram-Desktop`. All native UI,
 settings bridges and integration hooks belong directly in that fork. Rust
 settings and persistence belong in `crates/core`, with the C ABI in `crates/ffi`.
-Desktop uses Rust built-in settings, not Lua script management.
+Desktop uses Rust built-in settings. Lua, the keyword-rule engine and the old
+FFI have been removed; core retains only settings.
 
 The root-owned patch, prepare overlay and overlay tests have been removed.
 Do not apply an overlay or rewrite tracked client sources before building.
@@ -18,9 +19,8 @@ cannot reproduce this local integration yet. Publishing the fork commit and
 updating the root pin require separate authorization; local source checks or
 build success do not remove that requirement.
 
-- `History::createItem`: evaluates rules after message construction.
-- `HistoryItem`: caches the hidden state.
-- `HistoryView::Element::isHidden`: honors filtering and sponsored-message settings.
+- Native chat-list integration hides grouped chats from the main list.
+- `HistoryView::Element::isHidden`: honors sponsored-message visibility settings.
 - `Telegram/CMakeLists.txt`: enables the bridge on Windows.
 
 Other platforms retain the bridge stub until integrated. No generic hooking
@@ -32,14 +32,12 @@ framework is needed for these explicit source-level calls.
 not depend on the separate `ffi` workflow. That optional workflow includes
 Windows, Linux, macOS, Android and iOS compilation and now runs only through
 `workflow_dispatch`, while Desktop testing is the current priority. `core`
-continues running workspace tests, with fixtures in `crates/core/tests/fixtures`.
+continues running workspace tests; the old fixtures have been removed.
 It no longer fetches Desktop or runs overlay tests.
 
 The Windows artifact includes `Telegram.exe`, the root README and
 `BUILD-INFO.txt` recording root and Desktop commits. It does not package Lua
-runtime scripts, examples, LuaLS configuration or types. Historical Lua APIs
-remain in core for compatibility; `docs/lua/chatcraft.lua` and `examples/lua`
-are reference material, not a Desktop installation procedure.
+runtime scripts, examples, LuaLS configuration or types.
 
 ## Unified Rust library
 
@@ -111,19 +109,14 @@ server-side limits. Restart using the rebuilt executable to apply it. Do not
 lower capacity below the number of saved accounts without first removing excess
 accounts through the UI; existing storage is not automatically deleted.
 
-Lua is not used for these settings: API credentials and connection identity are
-needed during native MTProto/login initialization, before message-filter scripts
-are an appropriate configuration layer. Exposing credentials to user scripts
-would also unnecessarily broaden access to them.
-
 Native changes live in the Desktop submodule and must be published in the fork
 and the root pin advanced before a clean CI checkout can consume them; they are
 not supplied by any root-owned overlay.
 
 ## Configuration
 
-Native settings use the independent Rust settings ABI, not EngineConfig or a
-Lua script directory. The file is `tdata/chatcraft/settings.json` beneath
+Native settings use the Rust settings ABI. The file is
+`tdata/chatcraft/settings.json` beneath
 Telegram's working data directory. Accounts in the same installation using that
 data directory share it; separate working data directories have separate files.
 It is not automatically synchronized to another device. Preserve the applicable
@@ -137,9 +130,16 @@ actual client behavior needs compilation and manual validation of the completed
 fork integration. Unknown JSON fields are retained; unsupported versions are
 not overwritten. Save failures must be reported rather than silently accepted.
 
-Legacy EngineConfig, Lua and advertising environment APIs remain core
-compatibility surfaces, not the new Desktop configuration contract. The legacy
-Lua engine must still be created and called on the same thread.
+## UI ID catalog
+
+Desktop generates the UI ID catalog at build time. It currently contains 166
+entries, replacing the previous 22-entry whitelist. Stable literal IDs in the
+settings builder and main-menu entries are integrated. The visibility list has
+its own fixed-height scroll area and search.
+
+Computed IDs and Qt `objectName` values are not generically covered. Catalog
+size is not a promise that every control can be hidden; unknown entries remain
+visible by default.
 
 ## Current limitations
 
@@ -147,9 +147,6 @@ Grouped-chat filtering affects only the main-list presentation, not folder
 membership, unread counts, archive or search results. Pinned dragging is disabled
 while this presentation is active; turn filtering off to reorder pinned chats.
 `read_first` is reserved in core and has no Desktop ordering hook or UI switch.
-The UI list currently covers 22 integrated stable IDs, not arbitrary controls;
-new upstream entries are visible by default. Hidden settings-page buttons can
+The UI catalog does not cover arbitrary controls. Hidden settings-page buttons can
 still appear in native settings search; visibility is not access control.
 Sponsored messages are hidden at the view layer, not removed from the protocol.
-Desktop no longer loads Lua message filters. The old core APIs remain available
-for compatibility, but do not imply native support for their rendering actions.
