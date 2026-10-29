@@ -114,10 +114,16 @@ jobs:
           path: |
             ${{ env.LibrariesPath }}\[qQ]t[_-]*
             ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
-          key: ${{ runner.OS }}-x64-qt-${{ env.CACHE_KEY }}
-          restore-keys: ${{ runner.OS }}-x64-qt-
+            !${{ env.LibrariesPath }}\qt_*\**\CMakeFiles\**
+            !${{ env.LibrariesPath }}\qt_*\**\*.obj
+            !${{ env.LibrariesPath }}\qt_*\**\*.pch
+            !${{ env.LibrariesPath }}\qt_*\**\*.pdb
+            !${{ env.LibrariesPath }}\qt_*\**\*.ilk
+          key: ${{ runner.OS }}-x64-qt-v2-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.OS }}-x64-qt-v2-
 
       - name: Libraries.
+        id: prepare-libraries
         run: |
           %TBUILD%\desktop\Telegram\build\prepare\win.bat skip-release silent
 
@@ -147,13 +153,18 @@ jobs:
           key: ${{ runner.OS }}-x64-libs-v2-${{ env.CACHE_KEY }}
 
       - name: Qt cache save.
-        if: always() && steps.cache-qt.outputs.cache-hit != 'true'
+        if: always() && steps.prepare-libraries.outcome == 'success' && steps.cache-qt.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
             ${{ env.LibrariesPath }}\[qQ]t[_-]*
             ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
-          key: ${{ runner.OS }}-x64-qt-${{ env.CACHE_KEY }}
+            !${{ env.LibrariesPath }}\qt_*\**\CMakeFiles\**
+            !${{ env.LibrariesPath }}\qt_*\**\*.obj
+            !${{ env.LibrariesPath }}\qt_*\**\*.pch
+            !${{ env.LibrariesPath }}\qt_*\**\*.pdb
+            !${{ env.LibrariesPath }}\qt_*\**\*.ilk
+          key: ${{ runner.OS }}-x64-qt-v2-${{ env.CACHE_KEY }}
 
       - name: Verify dependencies.
         # 依赖完整性检查：失败时直接列出目录，便于定位是未构建还是路径不一致
