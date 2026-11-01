@@ -25,6 +25,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate Telegram API configuration
+        env:
+          CHATCRAFT_API_ID: ${{ secrets.CHATCRAFT_API_ID }}
+          CHATCRAFT_API_HASH: ${{ secrets.CHATCRAFT_API_HASH }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+          api_id = os.environ.get('CHATCRAFT_API_ID', '')
+          api_hash = os.environ.get('CHATCRAFT_API_HASH', '')
+          if not re.fullmatch(r'[1-9][0-9]*', api_id) or int(api_id) > 2147483647 or not re.fullmatch(r'[0-9a-fA-F]{32}', api_hash):
+              sys.exit('Configure CHATCRAFT_API_ID (positive int32) and CHATCRAFT_API_HASH (32 hex characters) repository secrets.')
+          PY
+
       - name: Validate Firebase configuration
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON }}
@@ -79,6 +94,9 @@ jobs:
       # The upstream keystore is public: this artifact is for testing, not distribution.
       # Android has not yet integrated the Chatcraft Rust settings used by Desktop.
       - name: Build test-signed APK
+        env:
+          CHATCRAFT_API_ID: ${{ secrets.CHATCRAFT_API_ID }}
+          CHATCRAFT_API_HASH: ${{ secrets.CHATCRAFT_API_HASH }}
         working-directory: clients/android
         run: >-
           bash ./gradlew :TMessagesProj_App:assembleAfatRelease

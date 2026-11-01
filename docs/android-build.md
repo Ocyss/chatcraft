@@ -4,6 +4,8 @@
 
 ## 必需配置
 
+Android CI 复用桌面已有的 `CHATCRAFT_API_ID` 和 `CHATCRAFT_API_HASH` 仓库 Secrets。构建步骤通过同名环境变量传给 Android fork，Gradle 校验后生成 `BuildConfig` 字段供 `BuildVars` 使用；不硬编码凭据、不回退到上游示例值、不在 CI 中重写源码。本地构建也必须设置这两个环境变量。API ID 必须为正 int32，API Hash 必须为 32 位十六进制字符串，缺失或格式错误时直接停止构建。
+
 在主仓库 GitHub Actions Secrets 中设置 `ANDROID_GOOGLE_SERVICES_JSON`，内容为 Firebase 为 Android 应用 `icu.ocyss.chatcraft` 导出的完整 `google-services.json`。配置只写入应用变体的配置目录，不重写 fork 中受版本控制的源码。缺失或包名不匹配时工作流提前失败，不会伪造 Firebase 身份或跳过配置检查。
 
 ## 构建与产物
@@ -19,6 +21,6 @@ bash ./gradlew :TMessagesProj_App:assembleAfatRelease -PAPP_PACKAGE=icu.ocyss.ch
 ## 限制
 
 - 当前使用上游仓库公开的示例 keystore，仅供测试；不要将其作为可信正式发布签名。
-- 当前 Android fork 仍保留上游 BuildVars 中的 Telegram API 身份及服务开关。桌面使用的 `CHATCRAFT_API_ID` / `CHATCRAFT_API_HASH` Secrets 尚未接入 Android；正式发布前必须在 fork 中接入自有 API 身份、签名和适用的第三方服务配置，审核 passkeys、商店及更新入口。
+- Telegram API 身份已接入自有 Secrets；其他上游服务开关未在本次修改。正式发布前仍需接入正式签名并审核适用的第三方服务配置、passkeys、商店及更新入口。
 - 本工作流仅编译现有 Android fork，不表示 Android 已具备桌面的 Chatcraft Rust 设置功能。
 - CI 编译、签名校验不等于设备上的登录、推送和客户端行为验证。
