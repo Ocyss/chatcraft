@@ -6,6 +6,9 @@ on:
     paths:
       - ".github/workflows/android.yml"
       - "clients/android"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
   workflow_dispatch:
 
 permissions:
@@ -77,6 +80,16 @@ jobs:
           sudo apt-get install -y nasm ninja-build
           sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018' 'cmake;3.22.1'
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Test Chatcraft core and C ABI
+        run: |
+          cargo test --locked -p chatcraft-core -p chatcraft-ffi
+          cargo build --locked -p chatcraft-ffi
+          python3 clients/android/Tools/test_chatcraft_core.py target/debug/libchatcraft_ffi.so
+
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Provide variant Firebase configuration
@@ -92,7 +105,7 @@ jobs:
           PY
 
       # The upstream keystore is public: this artifact is for testing, not distribution.
-      # Android has not yet integrated the Chatcraft Rust settings used by Desktop.
+
       - name: Build test-signed APK
         env:
           CHATCRAFT_API_ID: ${{ secrets.CHATCRAFT_API_ID }}
