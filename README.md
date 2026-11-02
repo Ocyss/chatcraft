@@ -12,6 +12,16 @@ Telegram 客户端的本地设置与过滤扩展。当前桌面方案采用 **Ru
 
 Telegram API 凭据、连接身份、本地账号容量与构建说明见 [桌面集成](docs/desktop-integration.md)。这些配置由原生构建与接入管理。
 
+## Android 接入
+
+Android 在主设置列表及设置搜索中提供 Chatcraft 入口，也保留“隐私与安全”右上角入口。原生设置页通过 JNI 调用相同 Rust settings/C ABI，配置保存到应用私有目录 `files/chatcraft/settings.json`，同一安装内账号共享，不与桌面或其他设备自动同步。
+
+- 支持主列表隐藏属于任意自定义文件夹的会话；文件夹内部、归档及会话选择列表不受该开关影响，不删除消息。启用过滤时禁止主列表置顶拖动重排。
+- 支持隐藏 sponsored 消息，接入聊天、搜索与视频广告路径；已打开聊天中的既有广告需重开聊天后确认效果。
+- UI 显隐提供搜索和恢复默认。Gradle 在构建时扫描原生 `ChatcraftCore.visible()` 稳定字面量调用并生成目录，目前接入主设置 28 项及隐私设置 30 项。仅这些原生接入项支持隐藏，不代表全客户端任意控件均可隐藏；设置搜索仍可能打开已隐藏的入口。Chatcraft 主设置入口始终保留，避免无法恢复。
+
+Android CI 检出主仓库固定的 fork 子模块提交，构建包含 Rust settings 的 APK。上述功能仍需以 CI 编译结果及真机验证为准；宿主 Rust/C ABI 测试与源码检查不代表 Android 编译或实际客户端行为已经验证。
+
 ## 源码与构建
 
 - `crates/core`：Rust 内置 settings。
