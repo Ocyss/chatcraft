@@ -20,7 +20,7 @@ bash ./gradlew :TMessagesProj_App:assembleAfatRelease -PAPP_PACKAGE=icu.ocyss.ch
 
 ## Rust core 与原生设置
 
-Android fork 的 `TMessagesProj/jni/chatcraft.cmake` 在现有 CMake 构建内按 ABI 执行 `cargo build --locked --release -p chatcraft-ffi`，使用 NDK API 23 linker，将正常生成的静态库与薄 JNI 编入 `tmessages.49`，没有源码 overlay 或构建时重写。Cargo 产物放在各 ABI 的 CMake binary directory；需从本主仓库布局构建 fork，以找到 `crates/` 和锁文件。无需 cargo-ndk 或新的 JNI Rust 依赖。
+Android fork 的 `TMessagesProj/jni/chatcraft.cmake` 在现有 CMake 构建内按 ABI 执行 `cargo build --locked --release -p chatcraft-ffi`，使用 NDK API 23 linker，将正常生成的静态库与薄 JNI 编入 `tmessages.49`，没有源码 overlay 或构建时重写。Cargo 产物放在各 ABI 的 CMake binary directory；需从本主仓库布局构建 fork，以找到 `crates/` 和锁文件。无需 cargo-ndk 或新的 JNI Rust 依赖。为避免与上游预编译 tlottie 的 `rust_eh_personality` 强定义冲突，使用同一 NDK 的 `llvm-objcopy` 将 Chatcraft 归档内该符号的定义与引用重命名为 `chatcraft_rust_eh_personality`，输出独立派生归档供链接；不修改 Cargo 原始归档、上游预编译库或受版本控制的源码，不放宽链接器重复定义检查，也不改变 panic 策略。
 
 通过原生「隐私与安全」页右上角 **Chatcraft** 进入设置。Rust settings 保存在应用私有 `files/chatcraft/settings.json`，所有 Telegram 账号共用，不随选中账号切换或账号退出而删除；清除应用数据/卸载仍会删除。JNI 通过 Java 串行化对进程级 handle 的访问，真实 UTF-8 转换避免 JSON 中补充平面字符损坏。设置编辑保留未知字段，读写错误在页面显示，不把保存失败当作成功。
 
