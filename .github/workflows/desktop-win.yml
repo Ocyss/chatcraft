@@ -1,12 +1,25 @@
 # 桌面端 Windows 完整构建：Rust FFI + Telegram Desktop (fork 子模块)
-# 裁剪自 clients/desktop/.github/workflows/win.yml，单配置 x64 / Debug。
+# 裁剪自 clients/desktop/.github/workflows/win.yml；默认 Debug，tag/手动 opt-in Release。
 name: desktop-win
 
 on:
   push:
     branches: [main]
+    tags: ["desktop-v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish native stable release (select an existing desktop-vVERSION tag)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ (startsWith(github.ref, 'refs/tags/desktop-v') || inputs.release == true) && 'desktop-win-release' || format('desktop-win-{0}', github.ref) }}
+  cancel-in-progress: false
 
 env:
   PREPARE_PATH: "Telegram/build/prepare/prepare.py"
@@ -16,6 +29,10 @@ jobs:
     name: Windows x64
     runs-on: windows-latest
     timeout-minutes: 360
+    # Protect this environment with required reviewers and desktop-v* tag rules.
+    environment: ${{ (startsWith(github.ref, 'refs/tags/desktop-v') || inputs.release == true) && 'desktop-release' || 'desktop-ci' }}
+    env:
+      RELEASE_BUILD: ${{ startsWith(github.ref, 'refs/tags/desktop-v') || inputs.release == true }}
 
     defaults:
       run:
@@ -43,6 +60,18 @@ jobs:
           git submodule update --init clients/desktop
           git -C clients/desktop submodule update --init --recursive
 
+      - name: Release preflight and external trust inputs.
+        if: env.RELEASE_BUILD == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHATCRAFT_UPDATE_ROOT_PEM: ${{ secrets.CHATCRAFT_UPDATE_ROOT_PEM }}
+          CHATCRAFT_UPDATE_MANIFEST: ${{ secrets.CHATCRAFT_UPDATE_MANIFEST }}
+          CHATCRAFT_UPDATE_MANIFEST_SIG_BASE64: ${{ secrets.CHATCRAFT_UPDATE_MANIFEST_SIG_BASE64 }}
+          CHATCRAFT_UPDATE_PACKAGE_KEY: ${{ secrets.CHATCRAFT_UPDATE_PACKAGE_KEY }}
+          CHATCRAFT_UPDATE_KEY_ID: ${{ secrets.CHATCRAFT_UPDATE_KEY_ID }}
+        run: python docs/desktop_release.py preflight --trust "$env:RUNNER_TEMP/chatcraft-update-trust"
+
       - name: Prepare directories.
         # 复刻官方布局：TBuild\Libraries 与客户端仓库互为兄弟目录
         run: |
@@ -66,6 +95,7 @@ jobs:
 
           echo "$(sha256sum $TBUILD/desktop/$PREPARE_PATH | awk '{ print $1 }')" >> CACHE_KEY.txt
           echo "$SDK" >> CACHE_KEY.txt
+          echo "$RELEASE_BUILD" >> CACHE_KEY.txt
           echo "${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/**', 'clients/desktop/Telegram/build/chatcraft/build-desktop-rust.py', '.github/workflows/desktop-win.yml') }}" >> CACHE_KEY.txt
           echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> $GITHUB_ENV
 
@@ -125,7 +155,11 @@ jobs:
       - name: Libraries.
         id: prepare-libraries
         run: |
-          %TBUILD%\desktop\Telegram\build\prepare\win.bat skip-release silent
+          if "%RELEASE_BUILD%"=="true" (
+            %TBUILD%\desktop\Telegram\build\prepare\win.bat skip-debug silent
+          ) else (
+            %TBUILD%\desktop\Telegram\build\prepare\win.bat skip-release silent
+          )
 
       - name: Build unified Rust static library.
         # 沿用 prepare 的工具链、Win7 target、build-std 和静态 CRT。
@@ -184,7 +218,16 @@ jobs:
         # 保留 tdesktop_rust：清理白名单不含 .cpp，会误删 wallet_engine 生成代码
         run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' -o -path '*/tdesktop_rust/*' ')' -type f ')' -o -empty ')' -delete
 
+      - name: Native stable release build.
+        if: env.RELEASE_BUILD == 'true'
+        shell: pwsh
+        env:
+          CHATCRAFT_API_ID: ${{ secrets.CHATCRAFT_API_ID }}
+          CHATCRAFT_API_HASH: ${{ secrets.CHATCRAFT_API_HASH }}
+        run: python docs/desktop_release.py configure --trust "$env:RUNNER_TEMP/chatcraft-update-trust"
+
       - name: Telegram Desktop build.
+        if: env.RELEASE_BUILD != 'true'
         # Pass secrets as environment data, never interpolate them into shell source.
         env:
           CHATCRAFT_API_ID: ${{ secrets.CHATCRAFT_API_ID }}
@@ -208,6 +251,7 @@ jobs:
           cmake --build ..\out --config Debug --parallel
 
       - name: Move artifact.
+        if: env.RELEASE_BUILD != 'true'
         run: |
           set OUT=%TBUILD%\desktop\out\Debug
           mkdir artifact
@@ -222,7 +266,51 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         name: Upload artifact.
+        if: env.RELEASE_BUILD != 'true'
         with:
           name: Telegram-Windows-x64
           path: artifact\
           retention-days: 3
+
+      - name: Sign native package and assemble portable release.
+        if: env.RELEASE_BUILD == 'true'
+        shell: pwsh
+        run: python docs/desktop_release.py package --trust "$env:RUNNER_TEMP/chatcraft-update-trust"
+
+      - name: Upload public release bundle.
+        if: env.RELEASE_BUILD == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-bundle
+          path: release-artifacts/
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Remove release trust material.
+        if: always() && env.RELEASE_BUILD == 'true'
+        shell: pwsh
+        run: |
+          $trust = Join-Path $env:RUNNER_TEMP 'chatcraft-update-trust'
+          if (Test-Path $trust) { Remove-Item -Recurse -Force $trust }
+
+  publish:
+    name: Publish native release
+    needs: windows
+    if: startsWith(github.ref, 'refs/tags/desktop-v') || inputs.release == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: desktop-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-release-bundle
+          path: release-artifacts
+      - name: Publish complete GitHub Release.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 docs/desktop_release.py publish --trust release-artifacts
