@@ -57,6 +57,8 @@ jobs:
         # 只拉 desktop：android/ios 暂不需要，且 ios 的嵌套子模块源仓库已失效
         shell: bash
         run: |
+          # Nested test262 paths exceed MAX_PATH; new submodules must inherit this setting.
+          git config --global core.longpaths true
           git submodule update --init clients/desktop
           if [ "$RELEASE_BUILD" = "true" ]; then
             # Release preflight checks every gitlink, including QuickJS test262 (update=none).
