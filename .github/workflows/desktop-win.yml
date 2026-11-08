@@ -163,7 +163,8 @@ jobs:
         id: prepare-libraries
         run: |
           if "%RELEASE_BUILD%"=="true" (
-            %TBUILD%\desktop\Telegram\build\prepare\win.bat skip-debug silent
+            rem Upstream builds Debug and Release dependencies by default; skip-debug is unsupported.
+            %TBUILD%\desktop\Telegram\build\prepare\win.bat silent
           ) else (
             %TBUILD%\desktop\Telegram\build\prepare\win.bat skip-release silent
           )

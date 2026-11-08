@@ -1,5 +1,6 @@
 """Run: python -m unittest discover -s docs -p test_desktop_release.py"""
 
+import ast
 import base64
 import json
 import os
@@ -14,6 +15,37 @@ import desktop_release as release
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_workflow_prepare_arguments_match_pinned_fork(self):
+        root = Path(__file__).resolve().parents[1]
+        prepare = root / "clients/desktop/Telegram/build/prepare/prepare.py"
+        if not prepare.is_file():
+            self.skipTest("Desktop submodule required for prepare interface check")
+        tree = ast.parse(prepare.read_text(encoding="utf-8"))
+        options = next(
+            ast.literal_eval(node.value)
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "optionsList"
+                for target in node.targets
+            )
+        )
+        workflow = (root / ".github/workflows/desktop-win.yml").read_text(
+            encoding="utf-8"
+        )
+        prefix = r"%TBUILD%\desktop\Telegram\build\prepare\win.bat "
+        calls = [
+            line.strip()[len(prefix) :].split()
+            for line in workflow.splitlines()
+            if line.strip().startswith(prefix)
+        ]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], ["silent"])
+        self.assertEqual(calls[1], ["skip-release", "silent"])
+        for args in calls:
+            for arg in args:
+                self.assertIn(arg, options + ["silent"])
+
     def test_release_tag(self):
         for tag in ("desktop-v7.4.1", "desktop-v7.4.1-r1", "desktop-v7.4.1-r12"):
             self.assertEqual(release.release_tag("refs/tags/" + tag, "7.4.1"), tag)

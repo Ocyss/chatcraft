@@ -96,7 +96,9 @@ not a persistent shared runner.
 
 ## Build and publish
 
-Release dependencies are prepared with `skip-debug`; the native build selects
+Release dependencies are prepared with `win.bat silent`, retaining the upstream
+default Debug and Release dependency builds. This fork supports `skip-release`
+for Debug-only CI, but does not support `skip-debug`. The native build selects
 Release and explicitly builds **Telegram, Updater and Packer**. CMake receives:
 
 - `DESKTOP_APP_SPECIAL_TARGET=win64` (enables the native Packer target)
