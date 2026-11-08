@@ -14,6 +14,21 @@ import desktop_release as release
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_release_tag(self):
+        for tag in ("desktop-v7.4.1", "desktop-v7.4.1-r1", "desktop-v7.4.1-r12"):
+            self.assertEqual(release.release_tag("refs/tags/" + tag, "7.4.1"), tag)
+        for tag in (
+            "desktop-v7.4.2-r1",
+            "desktop-v7.4.1-r0",
+            "desktop-v7.4.1-r01",
+            "desktop-v7.4.1-r",
+            "desktop-v7x4x1-r1",
+        ):
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                release.release_tag("refs/tags/" + tag, "7.4.1")
+        with self.assertRaises(ValueError):
+            release.release_tag("refs/heads/desktop-v7.4.1-r1", "7.4.1")
+
     def test_native_feed(self):
         self.assertEqual(
             release.feed(7003003, "td-update-win-x64-7003003"),

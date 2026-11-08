@@ -2,7 +2,7 @@
 
 `desktop-win.yml` keeps ordinary main/PR/manual builds in Debug with auto-update
 **disabled** and no Updater distributed. Release is explicitly opt-in: push a
-`desktop-vVERSION` tag, or dispatch the workflow on that existing tag with
+`desktop-vVERSION-rN` tag, or dispatch the workflow on that existing tag with
 `release: true`. There is no Scoop dependency, second version counter, source
 patching, or build-time source overlay.
 
@@ -10,14 +10,21 @@ patching, or build-time source overlay.
 
 First review, commit and push native changes in the desktop fork, then explicitly
 update the main repository's `clients/desktop` gitlink to that published commit.
-These are separate authorized operations; this tooling never commits, pushes or
-advances submodule pointers. CI checks out the recorded gitlink and recursively
+Agents are authorized to complete these commits, pushes and submodule pointer
+updates for the current task after checking the worktree and remotes; the release
+helper itself never performs these Git operations. CI checks out the recorded gitlink and recursively
 initializes the fork dependencies. A local dirty fork is not reproducible in CI.
 Preflight rejects a pinned fork missing the external trust interface.
 
 The native version comes only from `Telegram/build/version`: currently
-`AppVersion=7004001`, `AppVersionStr=7.4.1`. The corresponding release tag is
-`desktop-v7.4.1`. Stable updates require a **strictly larger native AppVersion**;
+`AppVersion=7004001`, `AppVersionStr=7.4.1`. Release tags use
+`desktop-v7.4.1-r1`, `desktop-v7.4.1-r2`, and so on: `7.4.1` is the native base
+version and `rN` is the ChatCraft release revision. Agents query remote tags and
+select the next unused revision, including failed tags when determining the
+maximum. A new base version starts at `r1`. Existing tags (including legacy tags
+without a revision) are never moved or reused. The helper accepts legacy tags
+for compatibility. The revision suffix does not change native `AppVersion` or
+bypass the strictly increasing update-version requirement. Stable updates require a **strictly larger native AppVersion**;
 rebuilding 7004001 never updates another 7004001 client. Increment the native base
 version in the fork for the next release, preserving its version-field conventions.
 Do not introduce an independent ChatCraft version. Beta/alpha are not supported

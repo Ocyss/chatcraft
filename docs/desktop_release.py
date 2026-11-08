@@ -158,16 +158,21 @@ def validate_trust(directory, key_id):
         raise ValueError("Package private key does not match manifest Ed25519 key")
 
 
+def release_tag(ref, label):
+    base = "desktop-v" + label
+    if not re.fullmatch(r"refs/tags/" + re.escape(base) + r"(?:-r[1-9][0-9]*)?", ref):
+        raise ValueError(
+            f"Release must run on existing tag {base}-rN, matching native version"
+        )
+    return ref.removeprefix("refs/tags/")
+
+
 def preflight(desktop, trust):
     repo = os.environ["GITHUB_REPOSITORY"]
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise ValueError("Invalid repository")
     number, label = version(desktop)
-    tag = "desktop-v" + label
-    if os.environ["GITHUB_REF"] != "refs/tags/" + tag:
-        raise ValueError(
-            f"Release must run on existing tag {tag}, matching native version"
-        )
+    tag = release_tag(os.environ["GITHUB_REF"], label)
     if output("git", "status", "--porcelain", "--untracked-files=no"):
         raise ValueError("Release requires a clean, pinned source checkout")
     if output("git", "-C", desktop, "status", "--porcelain", "--untracked-files=no"):
