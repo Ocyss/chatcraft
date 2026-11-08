@@ -49,6 +49,28 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release.version(desktop)
 
+    def test_preflight_reports_unpinned_submodules(self):
+        for status in "-+U":
+            with self.subTest(status=status):
+                line = status + "a" * 40 + " Telegram/dependency"
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "GITHUB_REPOSITORY": "owner/repo",
+                            "GITHUB_REF": "refs/tags/desktop-v7.4.1",
+                        },
+                    ),
+                    patch.object(release, "version", return_value=(7004001, "7.4.1")),
+                    patch.object(release, "output", return_value=""),
+                    patch.object(
+                        release.subprocess, "check_output", return_value=line + "\n"
+                    ),
+                ):
+                    with self.assertRaises(ValueError) as error:
+                        release.preflight(Path("desktop"), Path("trust"))
+                    self.assertIn(line, str(error.exception))
+
     def test_configure_enables_native_packer(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

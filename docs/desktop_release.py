@@ -175,8 +175,12 @@ def preflight(desktop, trust):
     lines = subprocess.check_output(
         ["git", "-C", str(desktop), "submodule", "status", "--recursive"], text=True
     ).splitlines()
-    if any(line[0] in "-+U" for line in lines):
-        raise ValueError("Desktop nested submodules must match recorded commits")
+    invalid = [line for line in lines if line and line[0] in "-+U"]
+    if invalid:
+        raise ValueError(
+            "Desktop nested submodules must match recorded commits:\n"
+            + "\n".join(invalid)
+        )
     options = (desktop / "Telegram/cmake/generate_update_keys.cmake").read_text()
     if "CHATCRAFT_UPDATE_MANIFEST_SIG" not in options:
         raise ValueError(

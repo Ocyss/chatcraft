@@ -58,7 +58,12 @@ jobs:
         shell: bash
         run: |
           git submodule update --init clients/desktop
-          git -C clients/desktop submodule update --init --recursive
+          if [ "$RELEASE_BUILD" = "true" ]; then
+            # Release preflight checks every gitlink, including QuickJS test262 (update=none).
+            git -C clients/desktop submodule update --init --recursive --checkout
+          else
+            git -C clients/desktop submodule update --init --recursive
+          fi
 
       - name: Release preflight and external trust inputs.
         if: env.RELEASE_BUILD == 'true'
