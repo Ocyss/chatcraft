@@ -27,7 +27,8 @@ env:
 jobs:
   windows:
     name: Windows x64
-    runs-on: windows-latest
+    # Breakpad release tools require the VS 2022 ATL components in this image.
+    runs-on: windows-2022
     timeout-minutes: 360
     # Protect this environment with required reviewers and desktop-v* tag rules.
     environment: ${{ (startsWith(github.ref, 'refs/tags/desktop-v') || inputs.release == true) && 'desktop-release' || 'desktop-ci' }}
@@ -115,6 +116,22 @@ jobs:
           arch: x64
           sdk: ${{ env.SDK }}
           toolset: 14.44
+          vsversion: "2022"
+
+      - name: Verify ATL toolchain.
+        if: env.RELEASE_BUILD == 'true'
+        shell: pwsh
+        run: |
+          $atl = Join-Path $env:VCToolsInstallDir 'atlmfc/include'
+          foreach ($header in @('atlbase.h', 'atlcomcli.h')) {
+            if (-not (Test-Path (Join-Path $atl $header))) {
+              throw "Missing ATL header $header under $atl; Breakpad release tools require VS 2022 ATL."
+            }
+          }
+          $includeDirs = $env:INCLUDE -split ';'
+          if (-not ($includeDirs | Where-Object { Test-Path (Join-Path $_ 'atlbase.h') })) {
+            throw 'ATL is installed but absent from the MSVC INCLUDE search path.'
+          }
 
       - name: NuGet sources.
         run: |

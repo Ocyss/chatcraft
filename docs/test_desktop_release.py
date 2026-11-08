@@ -15,6 +15,19 @@ import desktop_release as release
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_workflow_selects_atl_toolchain_before_dependencies(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/desktop-win.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("runs-on: windows-2022", workflow)
+        self.assertIn('vsversion: "2022"', workflow)
+        self.assertIn("'atlbase.h', 'atlcomcli.h'", workflow)
+        self.assertLess(
+            workflow.index("name: Verify ATL toolchain."),
+            workflow.index("name: Libraries."),
+        )
+
     def test_workflow_prepare_arguments_match_pinned_fork(self):
         root = Path(__file__).resolve().parents[1]
         prepare = root / "clients/desktop/Telegram/build/prepare/prepare.py"

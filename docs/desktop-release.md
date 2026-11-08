@@ -85,7 +85,9 @@ build/signing job has `contents: read`. Both release jobs use the protected
 environment (GitHub may require approval for both). No PAT or root-private-key
 secret is required. Release credentials are not passed to the normal Debug path.
 GitHub CLI, Python, OpenSSL and the native Windows toolchain must be installed on
-the runner (the workflow uses `windows-latest`).
+the runner (the workflow uses `windows-2022` with VS 2022 / MSVC 14.44 and ATL).
+Release checks ATL headers and the compiler include path before compiling
+dependencies, since Breakpad's `dump_syms` requires ATL.
 
 Preflight runs before dependency compilation, validates the root signature,
 manifest policy, signer/public-key match, expiry and revocation, source pins,
