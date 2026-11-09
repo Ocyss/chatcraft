@@ -1,11 +1,11 @@
 # 桌面端 Windows 完整构建：Rust FFI + Telegram Desktop (fork 子模块)
-# 裁剪自 clients/desktop/.github/workflows/win.yml；默认 Debug，tag/手动 opt-in Release。
+# 裁剪自 clients/desktop/.github/workflows/win.yml；默认 Debug，签名更新包仅手动 opt-in。
 name: desktop-win
 
 on:
   push:
     branches: [main]
-    tags: ["desktop-v*"]
+
   pull_request:
   workflow_dispatch:
     inputs:
@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ (startsWith(github.ref, 'refs/tags/desktop-v') || inputs.release == true) && 'desktop-win-release' || format('desktop-win-{0}', github.ref) }}
+  group: ${{ inputs.release == true && 'desktop-win-release' || format('desktop-win-{0}', github.ref) }}
   cancel-in-progress: false
 
 env:
@@ -27,13 +27,13 @@ env:
 jobs:
   windows:
     name: Windows x64
-    # Breakpad release tools require the VS 2022 ATL components in this image.
-    runs-on: windows-2022
+    # Keep the proven Debug runner; signed Release tools require VS 2022 ATL.
+    runs-on: ${{ inputs.release == true && 'windows-2022' || 'windows-latest' }}
     timeout-minutes: 360
     # Protect this environment with required reviewers and desktop-v* tag rules.
-    environment: ${{ (startsWith(github.ref, 'refs/tags/desktop-v') || inputs.release == true) && 'desktop-release' || 'desktop-ci' }}
+    environment: ${{ inputs.release == true && 'desktop-release' || 'desktop-ci' }}
     env:
-      RELEASE_BUILD: ${{ startsWith(github.ref, 'refs/tags/desktop-v') || inputs.release == true }}
+      RELEASE_BUILD: ${{ inputs.release == true }}
 
     defaults:
       run:
@@ -116,7 +116,7 @@ jobs:
           arch: x64
           sdk: ${{ env.SDK }}
           toolset: 14.44
-          vsversion: "2022"
+          vsversion: ${{ inputs.release == true && '2022' || '' }}
 
       - name: Verify ATL toolchain.
         if: env.RELEASE_BUILD == 'true'
@@ -321,7 +321,7 @@ jobs:
   publish:
     name: Publish native release
     needs: windows
-    if: startsWith(github.ref, 'refs/tags/desktop-v') || inputs.release == true
+    if: inputs.release == true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: desktop-release

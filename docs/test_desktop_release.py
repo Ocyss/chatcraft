@@ -15,13 +15,25 @@ import desktop_release as release
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_signed_pipeline_is_manual_only(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/desktop-win.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('tags: ["desktop-v*"]', workflow)
+        self.assertNotIn("startsWith(github.ref", workflow)
+        self.assertIn("RELEASE_BUILD: ${{ inputs.release == true }}", workflow)
+        self.assertIn("if: inputs.release == true", workflow)
+
     def test_workflow_selects_atl_toolchain_before_dependencies(self):
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github/workflows/desktop-win.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("runs-on: windows-2022", workflow)
-        self.assertIn('vsversion: "2022"', workflow)
+        self.assertIn(
+            "inputs.release == true && 'windows-2022' || 'windows-latest'", workflow
+        )
+        self.assertIn("inputs.release == true && '2022' || ''", workflow)
         self.assertIn("'atlbase.h', 'atlcomcli.h'", workflow)
         self.assertLess(
             workflow.index("name: Verify ATL toolchain."),

@@ -1,10 +1,19 @@
 # Windows native releases and self-update
 
 `desktop-win.yml` keeps ordinary main/PR/manual builds in Debug with auto-update
-**disabled** and no Updater distributed. Release is explicitly opt-in: push a
-`desktop-vVERSION-rN` tag, or dispatch the workflow on that existing tag with
-`release: true`. There is no Scoop dependency, second version counter, source
-patching, or build-time source overlay.
+**disabled** and no Updater distributed. Publishing a GitHub Release does not
+require a native Release build: agents may publish an existing successful Debug
+artifact as a clearly labeled manual-download zip, retaining its `BUILD-INFO.txt`
+and identifying the source run/commit in release notes. Verify its GitHub artifact
+SHA-256 digest and confirm the pinned desktop/Rust sources match the intended
+release before reusing it. Do not distribute `current6` or an update package for
+this Debug download, or claim it supports automatic updates.
+
+Pushing a `desktop-vVERSION-rN` tag no longer triggers the signed build pipeline.
+Signed native updates remain a separate opt-in: manually dispatch the workflow
+on an existing tag with `release: true`. Ordinary Debug builds retain the proven
+`windows-latest` runner; signed builds select `windows-2022` / VS 2022 with ATL.
+There is no Scoop dependency, source patching, or build-time source overlay.
 
 ## Source and version prerequisites
 
