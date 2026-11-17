@@ -110,7 +110,9 @@ not a persistent shared runner.
 Release dependencies are prepared with `win.bat silent`, retaining the upstream
 default Debug and Release dependency builds. This fork supports `skip-release`
 for Debug-only CI, but does not support `skip-debug`. The native build selects
-Release and explicitly builds **Telegram, Updater and Packer**. CMake receives:
+Release and explicitly builds **Telegram, Updater and Packer**. The build limits
+MSBuild to two concurrent projects and MSVC to two compiler processes per project
+(`/MP2`), avoiding PCH virtual-memory exhaustion on the hosted runner. CMake receives:
 
 - `DESKTOP_APP_SPECIAL_TARGET=win64` (enables the native Packer target)
 - `DESKTOP_APP_DISABLE_AUTOUPDATE=OFF`

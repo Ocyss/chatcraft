@@ -163,6 +163,10 @@ class ReleaseTests(unittest.TestCase):
             self.assertIn("DESKTOP_APP_DISABLE_AUTOUPDATE=OFF", configure)
             self.assertIn("Packer", build)
             self.assertIn("Updater", build)
+            self.assertEqual(build[-2:], ("--parallel", "2"))
+            self.assertTrue(
+                native.call_args_list[1].kwargs["env"]["_CL_"].endswith("/MP2")
+            )
 
     def test_package_payload_and_feed(self):
         with tempfile.TemporaryDirectory() as directory:

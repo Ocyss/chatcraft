@@ -276,6 +276,9 @@ def configure(desktop, trust):
     ):
         args += ["-D", "CHATCRAFT_UPDATE_" + option + "=" + (trust / name).as_posix()]
     run(*args, cwd=desktop / "Telegram")
+    build_env = os.environ.copy()
+    # Bound /MP as well as MSBuild project parallelism to avoid PCH memory exhaustion.
+    build_env["_CL_"] = (build_env.get("_CL_", "") + " /MP2").strip()
     run(
         "cmake",
         "--build",
@@ -287,6 +290,8 @@ def configure(desktop, trust):
         "Updater",
         "Packer",
         "--parallel",
+        "2",
+        env=build_env,
     )
 
 
