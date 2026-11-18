@@ -133,6 +133,26 @@ jobs:
             throw 'ATL is installed but absent from the MSVC INCLUDE search path.'
           }
 
+      - name: Configure Release virtual memory.
+        if: env.RELEASE_BUILD == 'true'
+        uses: al-cheb/configure-pagefile-action@a3b6ebd6b634da88790d9c58d4b37a7f4a7b8708 # v1.4
+        with:
+          minimum-size: 32GB
+          maximum-size: 32GB
+          disk-root: "D:"
+
+      - name: Verify Release virtual memory.
+        if: env.RELEASE_BUILD == 'true'
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          $pages = @(Get-CimInstance Win32_PageFileUsage)
+          $pages | Format-Table Name, AllocatedBaseSize, CurrentUsage, PeakUsage
+          Write-Host "Physical memory (KiB): $($os.TotalVisibleMemorySize); virtual memory (KiB): $($os.TotalVirtualMemorySize)"
+          if (($pages | Measure-Object AllocatedBaseSize -Sum).Sum -lt 32768) {
+            throw 'Release requires at least 32 GiB of active pagefile before compilation.'
+          }
+
       - name: NuGet sources.
         run: |
           nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"

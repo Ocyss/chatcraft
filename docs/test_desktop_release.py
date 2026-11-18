@@ -40,6 +40,20 @@ class ReleaseTests(unittest.TestCase):
             workflow.index("name: Libraries."),
         )
 
+    def test_release_checks_active_pagefile_before_compilation(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/desktop-win.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("minimum-size: 32GB", workflow)
+        self.assertIn("maximum-size: 32GB", workflow)
+        self.assertIn("Get-CimInstance Win32_PageFileUsage", workflow)
+        self.assertIn(".Sum -lt 32768", workflow)
+        self.assertLess(
+            workflow.index("name: Verify Release virtual memory."),
+            workflow.index("name: Native stable release build."),
+        )
+
     def test_workflow_prepare_arguments_match_pinned_fork(self):
         root = Path(__file__).resolve().parents[1]
         prepare = root / "clients/desktop/Telegram/build/prepare/prepare.py"
